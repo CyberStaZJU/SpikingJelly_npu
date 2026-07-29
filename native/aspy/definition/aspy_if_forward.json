@@ -1,0 +1,138 @@
+[
+  {
+    "op": "AsPyIfForward",
+    "input_desc": [
+      {
+        "name": "xSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "vInit",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "spikeSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "vSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "vFinal",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "hSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "attr": [
+      {
+        "name": "vThreshold",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "vReset",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "hardReset",
+        "param_type": "required",
+        "type": "bool"
+      }
+    ]
+  },
+  {
+    "op": "AsPyIfBackward",
+    "input_desc": [
+      {
+        "name": "hSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "spikeSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "gradSpikeSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "gradVSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "gradVFinal",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "gradXSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "gradVInit",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "attr": [
+      {
+        "name": "vThreshold",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "vReset",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "hardReset",
+        "param_type": "required",
+        "type": "bool"
+      },
+      {
+        "name": "detachReset",
+        "param_type": "required",
+        "type": "bool"
+      },
+      {
+        "name": "surrogateAlpha",
+        "param_type": "required",
+        "type": "float"
+      }
+    ]
+  }
+]
