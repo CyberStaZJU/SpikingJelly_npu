@@ -91,8 +91,10 @@ CHECKSUMS="SHA256SUMS"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/spikingjelly-npu-install.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fL --retry 3 -o "$TMP/$CHECKSUMS" "$BASE_URL/$CHECKSUMS"
-curl -fL --retry 3 -o "$TMP/$WHEEL" "$BASE_URL/$WHEEL"
+curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+  -o "$TMP/$CHECKSUMS" "$BASE_URL/$CHECKSUMS"
+curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+  -o "$TMP/$WHEEL" "$BASE_URL/$WHEEL"
 (
   cd "$TMP"
   grep "  $WHEEL\$" "$CHECKSUMS" | shasum -a 256 -c -
@@ -116,7 +118,8 @@ PY
 )"
 
 if [[ "$INSTALL_NATIVE" != never && "$NATIVE_OK" == yes ]]; then
-  curl -fL --retry 3 -o "$TMP/$BUNDLE" "$BASE_URL/$BUNDLE"
+  curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+    -o "$TMP/$BUNDLE" "$BASE_URL/$BUNDLE"
   (
     cd "$TMP"
     grep "  $BUNDLE\$" "$CHECKSUMS" | shasum -a 256 -c -
