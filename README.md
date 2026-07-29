@@ -1,6 +1,8 @@
 # spikingjelly_npu
 
-A standalone, PyTorch-native SNN core for **Ascend NPU / CANN**, with a focused compatibility layer for SpikingJelly `activation_based` APIs, graph-safe FedSNN building blocks, and an optional fused AsPy backend.
+> **Upstream lineage:** This project is derived from and built upon [SpikingJelly](https://github.com/fangwei123456/spikingjelly), the open-source SNN framework created and maintained by Fang Wei and its contributors. `spikingjelly_npu` adapts its activation-based design and compatible API subset for Ascend NPU/CANN, while adding the AsPy Ascend C kernels, NPUGraph integration, runtime routing, packaging, and deployment work in this repository. It is an independent downstream project and is not an official SpikingJelly distribution.
+
+A PyTorch-native SNN core for **Ascend NPU / CANN**, with a focused compatibility layer for SpikingJelly `activation_based` APIs, graph-safe FedSNN building blocks, and an optional fused AsPy backend.
 
 The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functionality runs on CPU for development and dispatches PyTorch operators to Ascend through torch-npu on the server. The Python wheel is pure Python. GitHub Releases additionally provide a stack-pinned, relocatable AsPy bundle for the qualified CANN 8.5 / torch-npu 2.9 environment; native source builds remain available for development.
 
