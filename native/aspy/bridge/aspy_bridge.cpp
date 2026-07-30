@@ -11,6 +11,8 @@
 #include "aclnn_as_py_if_forward.h"
 #include "aclnn_as_py_lif_backward.h"
 #include "aclnn_as_py_lif_forward.h"
+#include "aclnn_as_py_klif_backward.h"
+#include "aclnn_as_py_klif_forward.h"
 #include "aclnn_as_py_plif_backward.h"
 #include "aclnn_as_py_plif_forward.h"
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
@@ -729,6 +731,213 @@ std::vector<at::Tensor> plif_backward(
   return {grad_x_seq, grad_v_init, grad_reciprocal_tau_partial};
 }
 
+std::vector<at::Tensor> klif_forward(
+    const at::Tensor& x_seq,
+    const at::Tensor& v_init,
+    const at::Tensor& k,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset,
+    double tau,
+    bool decay_input,
+    bool scale_reset) {
+  check_sequence(x_seq, "x_seq");
+  check_tensor(v_init, "v_init");
+  check_tensor(k, "k");
+  TORCH_CHECK(std::isfinite(tau) && tau > 1.0, "tau must be finite and greater than 1");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(k.numel() == 8, "k must be an eight-element padded scalar tensor");
+  TORCH_CHECK(k.dim() == 1, "k must be a one-dimensional padded scalar tensor");
+  TORCH_CHECK(v_init.device() == x_seq.device(), "v_init must be on the same NPU");
+  TORCH_CHECK(k.device() == x_seq.device(), "k must be on the same NPU");
+  TORCH_CHECK(
+      v_init.sizes().equals(x_seq.sizes().slice(1)),
+      "v_init shape mismatch");
+
+  c10_npu::NPUGuard device_guard(x_seq.device());
+  at::Tensor spike_seq = empty_nd_like(x_seq);
+  at::Tensor v_seq = empty_nd_like(x_seq);
+  at::Tensor v_final = empty_nd_like(v_init);
+  at::Tensor h_seq = empty_nd_like(x_seq);
+  at::Tensor v_prev_seq = empty_nd_like(x_seq);
+
+  auto x_acl = std::make_shared<AclTensorHandle>(x_seq);
+  auto v_init_acl = std::make_shared<AclTensorHandle>(v_init);
+  auto k_acl = std::make_shared<AclTensorHandle>(k);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto v_seq_acl = std::make_shared<AclTensorHandle>(v_seq);
+  auto v_final_acl = std::make_shared<AclTensorHandle>(v_final);
+  auto h_seq_acl = std::make_shared<AclTensorHandle>(h_seq);
+  auto v_prev_seq_acl = std::make_shared<AclTensorHandle>(v_prev_seq);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyKlifForwardGetWorkspaceSize(
+          x_acl->get(),
+          v_init_acl->get(),
+          k_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          tau,
+          decay_input,
+          scale_reset,
+          spike_acl->get(),
+          v_seq_acl->get(),
+          v_final_acl->get(),
+          h_seq_acl->get(),
+          v_prev_seq_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyKlifForwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null KLIF forward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(x_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(x_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyKlifForward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       x_acl,
+       v_init_acl,
+       k_acl,
+       spike_acl,
+       v_seq_acl,
+       v_final_acl,
+       h_seq_acl,
+       v_prev_seq_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyKlifForward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {spike_seq, v_seq, v_final, h_seq, v_prev_seq};
+}
+
+std::vector<at::Tensor> klif_backward(
+    const at::Tensor& x_seq,
+    const at::Tensor& v_prev_seq,
+    const at::Tensor& h_seq,
+    const at::Tensor& spike_seq,
+    const at::Tensor& grad_spike_seq,
+    const at::Tensor& grad_v_seq,
+    const at::Tensor& grad_v_final,
+    const at::Tensor& k,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset,
+    bool detach_reset,
+    double surrogate_alpha,
+    double tau,
+    bool decay_input,
+    bool scale_reset) {
+  check_sequence(x_seq, "x_seq");
+  check_sequence(v_prev_seq, "v_prev_seq");
+  check_sequence(h_seq, "h_seq");
+  check_sequence(spike_seq, "spike_seq");
+  check_sequence(grad_spike_seq, "grad_spike_seq");
+  check_sequence(grad_v_seq, "grad_v_seq");
+  check_tensor(grad_v_final, "grad_v_final");
+  check_tensor(k, "k");
+  TORCH_CHECK(std::isfinite(tau) && tau > 1.0, "tau must be finite and greater than 1");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(
+      std::isfinite(surrogate_alpha) && surrogate_alpha > 0.0,
+      "surrogate_alpha must be finite and positive");
+  TORCH_CHECK(k.numel() == 8, "k must be an eight-element padded scalar tensor");
+  TORCH_CHECK(k.dim() == 1, "k must be a one-dimensional padded scalar tensor");
+  for (const at::Tensor* tensor :
+       {&v_prev_seq, &h_seq, &spike_seq, &grad_spike_seq, &grad_v_seq}) {
+    TORCH_CHECK(tensor->sizes().equals(x_seq.sizes()), "KLIF sequence shape mismatch");
+  }
+  TORCH_CHECK(
+      grad_v_final.sizes().equals(x_seq.sizes().slice(1)),
+      "grad_v_final shape mismatch");
+  for (const at::Tensor* tensor :
+       {&v_prev_seq, &h_seq, &spike_seq, &grad_spike_seq, &grad_v_seq,
+        &grad_v_final, &k}) {
+    TORCH_CHECK(tensor->device() == x_seq.device(), "KLIF tensor device mismatch");
+  }
+
+  c10_npu::NPUGuard device_guard(x_seq.device());
+  at::Tensor grad_x_seq = empty_nd_like(x_seq);
+  at::Tensor grad_v_init = empty_nd_like(grad_v_final);
+  at::Tensor grad_k_partial = empty_nd_like(grad_v_final);
+
+  auto x_acl = std::make_shared<AclTensorHandle>(x_seq);
+  auto v_prev_acl = std::make_shared<AclTensorHandle>(v_prev_seq);
+  auto h_acl = std::make_shared<AclTensorHandle>(h_seq);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto grad_spike_acl = std::make_shared<AclTensorHandle>(grad_spike_seq);
+  auto grad_v_seq_acl = std::make_shared<AclTensorHandle>(grad_v_seq);
+  auto grad_v_final_acl = std::make_shared<AclTensorHandle>(grad_v_final);
+  auto k_acl = std::make_shared<AclTensorHandle>(k);
+  auto grad_x_acl = std::make_shared<AclTensorHandle>(grad_x_seq);
+  auto grad_v_init_acl = std::make_shared<AclTensorHandle>(grad_v_init);
+  auto grad_k_partial_acl = std::make_shared<AclTensorHandle>(grad_k_partial);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyKlifBackwardGetWorkspaceSize(
+          x_acl->get(),
+          v_prev_acl->get(),
+          h_acl->get(),
+          spike_acl->get(),
+          grad_spike_acl->get(),
+          grad_v_seq_acl->get(),
+          grad_v_final_acl->get(),
+          k_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          detach_reset,
+          surrogate_alpha,
+          tau,
+          decay_input,
+          scale_reset,
+          grad_x_acl->get(),
+          grad_v_init_acl->get(),
+          grad_k_partial_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyKlifBackwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null KLIF backward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(x_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(x_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyKlifBackward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       x_acl,
+       v_prev_acl,
+       h_acl,
+       spike_acl,
+       grad_spike_acl,
+       grad_v_seq_acl,
+       grad_v_final_acl,
+       k_acl,
+       grad_x_acl,
+       grad_v_init_acl,
+       grad_k_partial_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyKlifBackward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {grad_x_seq, grad_v_init, grad_k_partial};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def(
       "fedsnn_decay_lif_forward",
@@ -742,6 +951,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("if_backward", &if_backward, "AsPy IF backward (NPU)");
   module.def("lif_forward", &lif_forward, "AsPy LIF forward (NPU)");
   module.def("lif_backward", &lif_backward, "AsPy LIF backward (NPU)");
+  module.def("klif_forward", &klif_forward, "AsPy KLIF forward (NPU)");
+  module.def("klif_backward", &klif_backward, "AsPy KLIF backward (NPU)");
   module.def("plif_forward", &plif_forward, "AsPy PLIF forward (NPU)");
   module.def("plif_backward", &plif_backward, "AsPy PLIF backward (NPU)");
 }

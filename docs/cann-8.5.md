@@ -43,7 +43,7 @@ source "$SPIKINGJELLY_NPU_ASPY_BUILD_ROOT/activate_aspy.sh"
 ASCEND_DEVICE_ID=7 scripts/run_aspy_tests.sh
 ```
 
-`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent ACLNN forward/backward operators for IF, fixed-tau LIF, dynamic-parameter PLIF, and the exact stateless FedSNN decay-LIF, targeting `ascend910b`, then builds `_spikingjelly_npu_aspy` with `NpuExtension`. Use `PYTHON=/path/to/python3.10` to select the interpreter. Before success it imports the extension and requires all eight forward/backward symbols. External `build-manifest.json` records those capabilities, tool/runtime identity, and a deterministic source-input digest over each included file's path, byte size, and SHA-256. Under Git, the scope is tracked plus untracked non-ignored files; filtered snapshots use the corresponding source-file scope. The bridge submits each operator to the current NPU stream through torch-npu `OpCommand::RunOpApiV2`. It retains workspace, ACL tensors, and executor ownership in the task-queue callback and has no explicit hot-path stream/device synchronization. PLIF passes reciprocal tau as a one-element FP32 NPU tensor, not a frozen host attribute.
+`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent ACLNN forward/backward operators for IF, fixed-tau LIF, learnable-`k` KLIF, dynamic-parameter PLIF, and the exact stateless FedSNN decay-LIF, targeting `ascend910b`, then builds `_spikingjelly_npu_aspy` with `NpuExtension`. Use `PYTHON=/path/to/python3.10` to select the interpreter. Before success it imports the extension and requires all ten forward/backward symbols. External `build-manifest.json` records those capabilities, tool/runtime identity, and a deterministic source-input digest over each included file's path, byte size, and SHA-256. Under Git, the scope is tracked plus untracked non-ignored files; filtered snapshots use the corresponding source-file scope. The bridge submits each operator to the current NPU stream through torch-npu `OpCommand::RunOpApiV2`. It retains workspace, ACL tensors, and executor ownership in the task-queue callback and has no explicit hot-path stream/device synchronization. PLIF passes reciprocal tau as a one-element FP32 NPU tensor, not a frozen host attribute.
 
 The native API is consumed through the public package classes, not by importing `_spikingjelly_npu_aspy` directly:
 
@@ -64,6 +64,12 @@ common = dict(
 
 if_node = neuron.IFNode(**common).to("npu:7")
 lif_node = neuron.LIFNode(tau=2.5, decay_input=True, **common).to("npu:7")
+klif_node = neuron.KLIFNode(
+    scale_reset=True,
+    tau=2.5,
+    decay_input=True,
+    **common,
+).to("npu:7")
 plif_node = neuron.ParametricLIFNode(
     init_tau=2.5,
     decay_input=True,
@@ -71,14 +77,14 @@ plif_node = neuron.ParametricLIFNode(
 ).to("npu:7")
 
 x = torch.rand(8, 64, 4096, device="npu:7", requires_grad=True)
-spikes = plif_node(x)
-loss = spikes.square().mean() + plif_node.v.square().mean()
+spikes = klif_node(x)
+loss = spikes.square().mean() + klif_node.v.square().mean()
 loss.backward()
-assert plif_node.last_backend_route.backend == "aspy"
-assert x.grad is not None and plif_node.w.grad is not None
+assert klif_node.last_backend_route.backend == "aspy"
+assert x.grad is not None and klif_node.k.grad is not None
 ```
 
-Qualified native scope: FP32 rank-two-or-higher time-major multi-step IF/LIF/PLIF with non-empty time and flattened-timestep dimensions; contiguous storage-offset-zero inputs/state; spiking ATan surrogate; hard or soft reset; both `detach_reset` values; both LIF/PLIF `decay_input` values; first-order input/carried-state gradients; and PLIF `w.grad`. LIF requires fixed float `tau > 1`. Unsupported or unavailable requests pre-fallback to PyTorch unless `backend_strict=True`; native failures after launch are not hidden by replaying a stateful eager step.
+Qualified native scope: FP32 rank-two-or-higher time-major multi-step IF/LIF/KLIF/PLIF with non-empty time and flattened-timestep dimensions; contiguous storage-offset-zero inputs/state; spiking ATan surrogate; hard or soft reset; both `detach_reset` values; LIF/KLIF/PLIF `decay_input`; KLIF `scale_reset`; first-order input/carried-state gradients; KLIF `k.grad`; and PLIF `w.grad`. LIF and KLIF require fixed float `tau > 1`. KLIF native eager parity is qualified at `rtol=5e-5, atol=3e-5`; no KLIF speed or NPUGraph claim is made. Unsupported or unavailable requests pre-fallback to PyTorch unless `backend_strict=True`; in particular, strict single-step KLIF raises `AsPyBackendError` rather than silently using eager PyTorch. Native failures after launch are not hidden by replaying a stateful eager step.
 
 ## Device configuration
 
@@ -96,7 +102,7 @@ device = configure_npu(
 
 ## NPUGraph constraints
 
-Real NPUGraph capture/replay is qualified for fixed-shape AsPy IF, LIF, and PLIF. The bridge remains on torch-npu's current stream during capture, and PLIF's reciprocal-tau device input remains dynamic across replay. The PLIF qualification changed both `w` and input over five replays and checked output, input gradient, and `w.grad` against native eager.
+Real NPUGraph capture/replay is qualified for fixed-shape AsPy IF, LIF, and PLIF. KLIF remains native-eager-only in the qualified scope. The bridge remains on torch-npu's current stream during capture, and PLIF's reciprocal-tau device input remains dynamic across replay. The PLIF qualification changed both `w` and input over five replays and checked output, input gradient, and `w.grad` against native eager.
 
 General restrictions remain:
 

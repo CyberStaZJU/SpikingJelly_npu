@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added SpikingJelly-compatible `KLIFNode` CPU semantics and a native-eager AsPy FP32 multi-step forward/backward path with hard/soft reset, `detach_reset`, `decay_input`, `scale_reset`, stored voltage sequence, input/carried-state gradients, and learnable scalar `k.grad`. Strict single-step AsPy KLIF requests raise instead of silently using eager PyTorch. KLIF NPUGraph and performance remain explicitly unclaimed.
+- Extended native capability probing to ten symbols and release-bundle reporting to expose KLIF separately from FedSNN decay-LIF support.
 - Added an exact stateless FedSNN decay-LIF AsPy forward/backward path and public `spikingjelly_npu.fedsnn.DecayLIF`, preserving multiply-then-add charging, detached soft reset, ATan surrogate, zero-initialized per-forward state, and first-order reverse-time gradients.
 - Added physical-format-safe routing: the native bridge remains `ACL_FORMAT_ND`-only, while the FedSNN adapter accepts rank-5 `ACL_FORMAT_NCDHW` convolutional sequences by copying their flattened view into fresh ND storage; unsupported formats fail or fall back before native execution.
 - Added capability detection and safe fallback for older native bundles that do not expose the FedSNN symbols, without compromising ordinary import safety. The existing `v0.1.0-alpha.1` bundle is explicitly documented as predating `packed_aspy`.

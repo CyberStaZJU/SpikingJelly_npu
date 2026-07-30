@@ -3,7 +3,7 @@
 ## Optimization hierarchy
 
 1. Pack stateless ANN operators across `[T*N, ...]`.
-2. Use fused AsPy IF/LIF/PLIF or the exact FedSNN decay-LIF only inside their qualified Ascend scope.
+2. Use fused AsPy IF/LIF/KLIF/PLIF or the exact FedSNN decay-LIF only inside their qualified Ascend scope; KLIF currently has parity qualification but no performance claim.
 3. Capture repeated fixed-shape full batches with NPUGraph only where actual-shape capture is separately qualified.
 4. Keep diagnostics eager; use the qualified stateless decay-LIF for FedSNN remainder batches, while generic graph remainders stay eager.
 5. Keep explicit host synchronization outside the model hot path and use it only at measurement or correctness boundaries.

@@ -11,14 +11,14 @@ The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functiona
 ## Features
 
 - SpikingJelly-style `activation_based` APIs:
-  - `IFNode`, `LIFNode`, `ParametricLIFNode`;
+  - `IFNode`, `LIFNode`, `KLIFNode`, `ParametricLIFNode`;
   - `surrogate.ATan`, `Sigmoid`, `PiecewiseQuadratic`, `SoftSign`, `SuperSpike`;
   - reset/detach/backend/step-mode helpers and sequence utilities;
   - step-aware Linear, Conv1d/2d/3d, BatchNorm, pooling, flatten, and voting layers.
 - Correct hard/soft reset, `detach_reset`, `store_v_seq`, persistent state, and PLIF `w` state-dict semantics.
 - Packed stateless layers over `[T*N, ...]` and `StaticGraphRunner` fixed-full-batch NPUGraph with visible eager fallback.
-- Optional AsPy FP32 multi-step native routes for IF, fixed-tau LIF, dynamic-parameter PLIF, and an exact stateless FedSNN `membrane_decay * membrane + current` decay-LIF scan on Ascend 910B4/CANN 8.5.
-- AsPy first-order ATan-surrogate backward, input/carried-state gradients, and PLIF `w.grad`.
+- Optional AsPy FP32 multi-step native routes for IF, fixed-tau LIF, learnable-`k` KLIF, dynamic-parameter PLIF, and an exact stateless FedSNN `membrane_decay * membrane + current` decay-LIF scan on Ascend 910B4/CANN 8.5.
+- AsPy first-order ATan-surrogate backward, input/carried-state gradients, KLIF `k.grad`, and PLIF `w.grad`.
 - Real fixed-shape NPUGraph capture/replay for AsPy IF, LIF, and PLIF; PLIF reciprocal tau remains a dynamic device-tensor input during replay.
 - Observable AsPy fallback/strict decisions through `last_backend_route` and `AsPyBackendError`.
 - CPU fallback and import safety: the package does not explicitly import `torch_npu` at import time. PyTorch may independently autoload an installed device backend unless `TORCH_DEVICE_BACKEND_AUTOLOAD=0` is set.
@@ -32,9 +32,9 @@ The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functiona
 curl -fsSL https://raw.githubusercontent.com/CyberStaZJU/SpikingJelly_npu/main/install.sh | bash
 ```
 
-The installer verifies SHA-256 hashes and installs the artifacts attached to the selected release. On the exact qualified native matrix—Linux aarch64, CPython 3.10, torch 2.9.0, torch-npu 2.9.0, CANN 8.5 and Ascend 910B—it can also install that release's relocatable AsPy bundle. `--check` reports the complete matrix without installing. Use `--require-native` to reject either a mismatched environment **or a bundle that lacks the FedSNN decay-LIF capability**; use `--fallback-only` to install only the eager-compatible wheel. In ordinary auto mode, a bundle without that capability is installed only for its generic IF/LIF/PLIF routes and produces an explicit warning that `packed_aspy` is unavailable. It never uses `sudo` or changes the system CANN installation.
+The installer verifies SHA-256 hashes and installs the artifacts attached to the selected release. On the exact qualified native matrix—Linux aarch64, CPython 3.10, torch 2.9.0, torch-npu 2.9.0, CANN 8.5 and Ascend 910B—it can also install that release's relocatable AsPy bundle. `--check` reports the complete matrix without installing. Use `--require-native` to reject either a mismatched environment **or a bundle that lacks the FedSNN decay-LIF capability**; use `--fallback-only` to install only the eager-compatible wheel. In ordinary auto mode, bundle probing reports KLIF and FedSNN decay-LIF separately: missing KLIF produces an explicit KLIF fallback warning, while missing decay-LIF warns that `packed_aspy` is unavailable; legacy IF/LIF/PLIF routes remain usable. It never uses `sudo` or changes the system CANN installation.
 
-> **`packed_aspy` availability:** the existing `v0.1.0-alpha.1` release predates the FedSNN decay-LIF symbols. Until a newer release explicitly lists `packed_aspy` in its notes and native manifest, clone `main` and use the [source-build procedure](#optional-aspy-build) below. The installer probes the extracted extension before registration and prints its `fedsnn_decay_lif` capability; `--require-native` fails before package or bundle installation when that capability is absent.
+> **`packed_aspy` availability:** the existing `v0.1.0-alpha.1` release predates the FedSNN decay-LIF symbols. Until a newer release explicitly lists `packed_aspy` in its notes and native manifest, clone `main` and use the [source-build procedure](#optional-aspy-build) below. The installer probes the extracted extension before registration and prints its `klif` and `fedsnn_decay_lif` capabilities; `--require-native` fails before package or bundle installation when the FedSNN capability is absent.
 
 Ordinary import remains side-effect safe:
 
@@ -84,9 +84,9 @@ source "$SPIKINGJELLY_NPU_ASPY_BUILD_ROOT/activate_aspy.sh"
 ASCEND_DEVICE_ID=7 scripts/run_aspy_tests.sh
 ```
 
-`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent IF, fixed-tau LIF, PLIF, and exact FedSNN decay-LIF forward/backward ACLNN operators for `ascend910b`, then builds `_spikingjelly_npu_aspy` with torch-npu `NpuExtension`. Set `PYTHON=/path/to/python3.10` when the desired interpreter is not `python3`. Before reporting success, the script imports the built extension and requires all eight forward/backward symbols. The external `build-manifest.json` records that capability set, source Git identity/dirty state, and a deterministic SHA-256 over `path`, byte size, and file SHA-256 for every tracked plus untracked non-ignored build-input file (or the equivalent filtered snapshot scope outside Git), along with runtime versions, toolkit path, `msopgen`, CMake, compiler, and target SOC. The bridge submits on the current NPU stream through `at_npu::native::OpCommand::RunOpApiV2`, keeps workspace and ACL object owners alive in the task-queue callback, and has no explicit synchronization in the native forward/backward hot path.
+`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent IF, fixed-tau LIF, learnable-`k` KLIF, PLIF, and exact FedSNN decay-LIF forward/backward ACLNN operators for `ascend910b`, then builds `_spikingjelly_npu_aspy` with torch-npu `NpuExtension`. Set `PYTHON=/path/to/python3.10` when the desired interpreter is not `python3`. Before reporting success, the script imports the built extension and requires all ten forward/backward symbols. The external `build-manifest.json` records that capability set, source Git identity/dirty state, and a deterministic SHA-256 over `path`, byte size, and file SHA-256 for every tracked plus untracked non-ignored build-input file (or the equivalent filtered snapshot scope outside Git), along with runtime versions, toolkit path, `msopgen`, CMake, compiler, and target SOC. The bridge submits on the current NPU stream through `at_npu::native::OpCommand::RunOpApiV2`, keeps workspace and ACL object owners alive in the task-queue callback, and has no explicit synchronization in the native forward/backward hot path.
 
-Qualified native inputs are rank-two-or-higher FP32 time-major sequences with a non-empty time dimension and non-empty flattened timestep, contiguous storage-offset-zero NPU storage, and a spiking `surrogate.ATan`. LIF requires a fixed Python float `tau > 1`; PLIF transports reciprocal tau as a one-element contiguous FP32 NPU tensor, so `w` and `w.grad` remain live. The native bridge itself accepts only physical `ACL_FORMAT_ND` storage. The FedSNN adapter additionally recognizes real convolutional rank-5 `ACL_FORMAT_NCDHW` outputs, reshapes and clones them into fresh ND storage before launch, and rejects other physical formats before loading or calling the extension. The FedSNN-specific stateless path preserves the application's exact charge ordering, detached soft reset, ATan derivative, and zero membrane at each public forward; it is exposed as `spikingjelly_npu.fedsnn.DecayLIF`. Only first-order gradients are supported. FP16/BF16, non-ATan or non-spiking surrogates, unsupported layouts, and arbitrary dynamic-shape graphs use observable pre-execution fallback or strict failure. Stateful IF/LIF/PLIF nodes in single-step mode intentionally remain on PyTorch even when `backend_strict=True`; strict native enforcement applies to qualified multi-step requests such as `packed_aspy`.
+Qualified native inputs are rank-two-or-higher FP32 time-major sequences with a non-empty time dimension and non-empty flattened timestep, contiguous storage-offset-zero NPU storage, and a spiking `surrogate.ATan`. LIF and KLIF require a fixed Python float `tau > 1`; KLIF keeps public learnable scalar `k` live and expands it into an aligned device block only at the native boundary, while PLIF transports reciprocal tau as a one-element contiguous FP32 NPU tensor so `w` and `w.grad` remain live. The native bridge itself accepts only physical `ACL_FORMAT_ND` storage. The FedSNN adapter additionally recognizes real convolutional rank-5 `ACL_FORMAT_NCDHW` outputs, reshapes and clones them into fresh ND storage before launch, and rejects other physical formats before loading or calling the extension. The FedSNN-specific stateless path preserves the application's exact charge ordering, detached soft reset, ATan derivative, and zero membrane at each public forward; it is exposed as `spikingjelly_npu.fedsnn.DecayLIF`. Only first-order gradients are supported. FP16/BF16, non-ATan or non-spiking surrogates, unsupported layouts, and arbitrary dynamic-shape graphs use observable pre-execution fallback or strict failure. Stateful IF/LIF/PLIF nodes in single-step mode intentionally remain on PyTorch even when `backend_strict=True`; strict native enforcement applies to qualified multi-step requests such as `packed_aspy`.
 
 ## AsPy public interface
 
@@ -107,6 +107,12 @@ common = dict(
 
 if_node = neuron.IFNode(**common).to("npu:7")
 lif_node = neuron.LIFNode(tau=2.5, decay_input=True, **common).to("npu:7")
+klif_node = neuron.KLIFNode(
+    scale_reset=True,
+    tau=2.5,
+    decay_input=True,
+    **common,
+).to("npu:7")
 plif_node = neuron.ParametricLIFNode(
     init_tau=2.5,
     decay_input=True,
@@ -114,15 +120,15 @@ plif_node = neuron.ParametricLIFNode(
 ).to("npu:7")
 
 x = torch.rand(8, 64, 4096, device="npu:7", requires_grad=True)
-spikes = plif_node(x)
-loss = spikes.square().mean() + plif_node.v.square().mean()
+spikes = klif_node(x)
+loss = spikes.square().mean() + klif_node.v.square().mean()
 loss.backward()
 
-assert plif_node.last_backend_route.backend == "aspy"
-assert x.grad is not None and plif_node.w.grad is not None
+assert klif_node.last_backend_route.backend == "aspy"
+assert x.grad is not None and klif_node.k.grad is not None
 ```
 
-For qualified multi-step requests, `backend_strict=False` falls back to the PyTorch implementation before native execution and `backend_strict=True` raises `AsPyBackendError`. Single-step IF/LIF/PLIF remains an intentional observable PyTorch compatibility path under either setting. Once a native launch starts, failures propagate rather than silently replaying a stateful eager step.
+For qualified multi-step requests, `backend_strict=False` falls back to the PyTorch implementation before native execution and `backend_strict=True` raises `AsPyBackendError`. Single-step IF/LIF/PLIF remains an intentional observable PyTorch compatibility path under either setting. Single-step KLIF also falls back when non-strict, but `backend="aspy", backend_strict=True` rejects it because no native single-step KLIF route exists. Once a native launch starts, failures propagate rather than silently replaying a stateful eager step.
 
 ## Ordinary PyTorch quick start
 
@@ -202,10 +208,10 @@ For CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5, 1706 sample
 - sequences are time-major `[T,N,...]`;
 - neuron state persists until `reset()` / `reset_net()`;
 - `v` and `v_seq` are not state-dict entries;
-- PLIF stores scalar parameter `w`;
+- KLIF stores scalar parameter `k`; PLIF stores scalar parameter `w`;
 - `backend="torch"` works on CPU or NPU tensors;
 - `backend="npu"` is an explicit alias for ordinary PyTorch operators on NPU;
-- `backend="aspy"` is the optional IF/LIF/PLIF Ascend route, not a CuPy array backend;
+- `backend="aspy"` is the optional IF/LIF/KLIF/PLIF Ascend route, not a CuPy array backend;
 - for compatible SpikingJelly constructors, `backend="cupy"` is accepted only as an observable preference alias for AsPy with eager fallback; no CuPy array/kernel API is implemented;
 - CUDA CuPy kernels, Triton CUDA kernels, custom CUDA extensions, and the full SpikingJelly catalog are intentionally unsupported.
 
@@ -218,7 +224,8 @@ All AsPy numbers below are component-level measurements on Ascend 910B4 `npu:7`,
 - **IF three paths:** fixed `[B,T,F]=[64,8,4096]`; full reset + gain + IF + linear readout + MSE + backward; 10 warmups, 50 measured iterations, synchronize after warmup and every measured iteration, three fresh processes. Median-of-run-medians: PyTorch 9.241211 ms, AsPy eager 2.685313 ms, AsPy NPUGraph 2.056798 ms. Median run speedups: 3.401488× eager and 4.606828× graph. All graph routes were true NPUGraph; output/loss were exact and maximum gain-gradient absolute error was `9.313225746e-10`.
 - **PLIF:** fixed `[T,B,F]=[8,64,4096]`; forward + spike/final-state loss + backward for input and `w`; 10 warmups, 50 measured iterations, same synchronization policy, three fresh processes. Run speedups were 5.320089×, 6.337813×, and 4.311383×; median 5.320089×. Three fresh determinism hashes, three 20-step optimizer trajectories, and five dynamic-`w` true-NPUGraph replays passed.
 - **LIF:** fixed-tau forward/backward, carried state, strict/fallback, and true fixed-shape NPUGraph are covered by the full real-NPU AsPy suite. No standalone LIF performance number is claimed.
-- **Full AsPy NPU suite at final PLIF snapshot:** 76 passed.
+- **KLIF:** real-NPU qualification covers full/remainder/singleton shapes, hard/soft reset, both `detach_reset`, `decay_input`, and `scale_reset` values, carried state, input gradient, and scalar `k.grad` at `rtol=5e-5, atol=3e-5`. No KLIF speed or NPUGraph claim is made.
+- **Full AsPy NPU suite:** see the current CANN 8.5 verification evidence; older PLIF-only snapshot counts do not include KLIF.
 
 - **FedSNN AlexNet-BNTT `packed_aspy`:** Ascend 910B4, CANN 8.5.0, Python 3.10.20, torch/torch-npu 2.9.0, FP32, CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5. Five balanced fresh-process measurements, each after one complete-client warmup epoch and synchronized once before/after the measured client, gave medians `legacy_stepwise=5.3214 s`, `packed_eager=5.0087 s`, `packed_aspy=4.3882 s`. The AsPy route was native for all six spiking layers and all 70 measured forwards per run. Actual-model gradients passed at the accepted `rtol=5e-5, atol=3e-5`; this is tolerance equivalence, not bitwise equivalence.
 

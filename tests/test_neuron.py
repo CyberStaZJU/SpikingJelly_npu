@@ -393,6 +393,262 @@ def test_aspy_plif_strict_cpu_rejection_and_single_step_fallback(monkeypatch):
     assert "single-step" in single.last_backend_route.reason
 
 
+@pytest.mark.parametrize("scale_reset", [False, True])
+@pytest.mark.parametrize("decay_input", [False, True])
+def test_klif_single_multi_reset_state_and_first_order_gradients(
+    scale_reset, decay_input
+):
+    kwargs = {
+        "scale_reset": scale_reset,
+        "tau": 2.5,
+        "decay_input": decay_input,
+        "v_threshold": 0.7,
+        "v_reset": None,
+        "surrogate_function": surrogate.ATan(alpha=2.5),
+        "detach_reset": False,
+        "store_v_seq": True,
+    }
+    multi = neuron.KLIFNode(step_mode="m", **kwargs)
+    single = neuron.KLIFNode(step_mode="s", **kwargs)
+    single.load_state_dict(multi.state_dict())
+    assert tuple(multi.state_dict()) == ("k",)
+
+    x_multi = torch.tensor(
+        [[[0.4, -0.2]], [[0.6, 0.5]], [[0.3, 0.8]]], requires_grad=True
+    )
+    initial_v = torch.tensor([[0.1, -0.1]], requires_grad=True)
+    multi.v = initial_v
+    single.v = initial_v.detach().clone().requires_grad_(True)
+
+    y_multi = multi(x_multi)
+    x_single = x_multi.detach().clone().requires_grad_(True)
+    y_single = torch.stack([single(x_single[t]) for t in range(x_single.shape[0])])
+    v_single = single.v
+
+    torch.testing.assert_close(y_multi, y_single)
+    torch.testing.assert_close(multi.v, v_single)
+    assert multi.v_seq.shape == x_multi.shape
+    torch.testing.assert_close(multi.v_seq[-1], multi.v)
+
+    loss_multi = y_multi.sum() + multi.v.sum() + multi.v_seq.sum()
+    loss_single = y_single.sum() + v_single.sum()
+    loss_multi.backward()
+    loss_single.backward()
+    assert x_multi.grad is not None and torch.isfinite(x_multi.grad).all()
+    assert initial_v.grad is not None and torch.isfinite(initial_v.grad).all()
+    assert multi.k.grad is not None and torch.isfinite(multi.k.grad).all()
+
+    old_k = multi.k.detach().clone()
+    functional.reset_net(multi)
+    torch.testing.assert_close(multi.v, torch.zeros_like(multi.v))
+    torch.testing.assert_close(multi.k, old_k)
+    multi(torch.zeros(2, 3, 4))
+    assert multi.v.shape == (3, 4)
+
+
+def test_klif_matches_frozen_upstream_equations_and_persistent_state():
+    node = neuron.KLIFNode(
+        scale_reset=True,
+        tau=2.0,
+        decay_input=False,
+        v_threshold=0.8,
+        v_reset=0.0,
+        surrogate_function=surrogate.ATan(alpha=2.0),
+        step_mode="m",
+        store_v_seq=True,
+    )
+    with torch.no_grad():
+        node.k.fill_(1.5)
+    x = torch.tensor([[[0.4]], [[0.7]], [[0.2]]], requires_grad=True)
+
+    expected_spikes = []
+    expected_v = torch.zeros_like(x[0])
+    expected_v_seq = []
+    k = node.k
+    for current in x:
+        charged = expected_v - expected_v / node.tau + current
+        fired_voltage = torch.relu(k * charged)
+        spike = node.surrogate_function(fired_voltage - node.v_threshold)
+        reset_voltage = fired_voltage / k
+        expected_v = reset_voltage * (1.0 - spike) + node.v_reset * spike
+        expected_spikes.append(spike)
+        expected_v_seq.append(expected_v)
+
+    actual = node(x)
+    torch.testing.assert_close(actual, torch.stack(expected_spikes))
+    torch.testing.assert_close(node.v_seq, torch.stack(expected_v_seq))
+    torch.testing.assert_close(node.v, expected_v)
+
+    node.step_mode = "s"
+    node(torch.tensor([[0.1]]))
+    assert isinstance(node.v, torch.Tensor)
+
+
+def test_aspy_klif_cpu_fallback_strict_and_single_step(monkeypatch):
+    kwargs = {
+        "scale_reset": True,
+        "tau": 2.5,
+        "decay_input": True,
+        "v_threshold": 0.7,
+        "v_reset": None,
+        "surrogate_function": surrogate.ATan(alpha=2.5),
+        "detach_reset": False,
+        "step_mode": "m",
+        "store_v_seq": True,
+    }
+    torch_node = neuron.KLIFNode(backend="torch", **kwargs)
+    aspy_node = neuron.KLIFNode(backend="aspy", **kwargs)
+    aspy_node.load_state_dict(torch_node.state_dict())
+    x_torch = torch.tensor([[[0.6]], [[0.6]], [[0.2]]], requires_grad=True)
+    x_aspy = x_torch.detach().clone().requires_grad_(True)
+
+    y_torch = torch_node(x_torch)
+    y_aspy = aspy_node(x_aspy)
+    (y_torch.sum() + torch_node.v.sum() + torch_node.v_seq.sum()).backward()
+    (y_aspy.sum() + aspy_node.v.sum() + aspy_node.v_seq.sum()).backward()
+    torch.testing.assert_close(y_aspy, y_torch)
+    torch.testing.assert_close(aspy_node.v, torch_node.v)
+    torch.testing.assert_close(aspy_node.v_seq, torch_node.v_seq)
+    torch.testing.assert_close(x_aspy.grad, x_torch.grad)
+    torch.testing.assert_close(aspy_node.k.grad, torch_node.k.grad)
+    assert aspy_node.last_backend_route.backend == "torch"
+    assert "requires an NPU tensor" in aspy_node.last_backend_route.reason
+
+    load_calls = []
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: load_calls.append(True))
+    strict = neuron.KLIFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    with pytest.raises(_aspy.AsPyBackendError, match="requires an NPU tensor"):
+        strict(torch.ones(2, 1, 1))
+    assert load_calls == []
+
+    single_fallback = neuron.KLIFNode(
+        backend="aspy",
+        step_mode="s",
+        surrogate_function=surrogate.ATan(),
+    )
+    output = single_fallback(torch.ones(1, 1))
+    assert output.shape == (1, 1)
+    assert single_fallback.last_backend_route.backend == "torch"
+    assert "single-step" in single_fallback.last_backend_route.reason
+
+    single_strict = neuron.KLIFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="s",
+        surrogate_function=surrogate.ATan(),
+    )
+    with pytest.raises(_aspy.AsPyBackendError, match="multi-step only"):
+        single_strict(torch.ones(1, 1))
+    assert load_calls == []
+    assert single_strict.v == 0.0
+
+
+def test_aspy_klif_old_bundle_falls_back_or_strictly_errors(monkeypatch):
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (SimpleNamespace(lif_multi_step=lambda *args: None), None),
+    )
+    fallback = neuron.KLIFNode(
+        backend="aspy", step_mode="m", surrogate_function=surrogate.ATan()
+    )
+    output = fallback(torch.zeros(2, 1, 1))
+    assert output.shape == (2, 1, 1)
+    assert fallback.last_backend_route.backend == "torch"
+    assert "does not provide callable klif_multi_step" in fallback.last_backend_route.reason
+
+    strict = neuron.KLIFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    with pytest.raises(_aspy.AsPyBackendError, match="klif_multi_step"):
+        strict(torch.zeros(2, 1, 1))
+
+
+def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
+    node = neuron.KLIFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(3, 2, 4)
+    spike_seq = torch.ones_like(x)
+    v_seq = torch.full_like(x, 0.25)
+    v_final = v_seq[-1].clone()
+    calls = []
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                klif_multi_step=lambda *args: calls.append(args)
+                or (spike_seq, v_final, v_seq)
+            ),
+            None,
+        ),
+    )
+    output = node(x)
+    assert output is spike_seq
+    assert node.v is v_final
+    assert node.v_seq is v_seq
+    assert calls[0][2] is node.k
+    assert calls[0][-3:] == (node.tau, node.decay_input, node.scale_reset)
+    assert node.last_backend_route.backend == "aspy"
+    assert "KLIF" in node.last_backend_route.reason
+
+    failing = neuron.KLIFNode(
+        backend="aspy", step_mode="m", surrogate_function=surrogate.ATan()
+    )
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                klif_multi_step=lambda *args: (_ for _ in ()).throw(
+                    RuntimeError("native KLIF launch failed")
+                )
+            ),
+            None,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="native KLIF launch failed"):
+        failing(x)
+    torch.testing.assert_close(failing.v, torch.zeros_like(x[0]))
+
+    malformed = neuron.KLIFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                klif_multi_step=lambda *args: (
+                    torch.ones(1), torch.ones_like(x[0]), torch.ones_like(x)
+                )
+            ),
+            None,
+        ),
+    )
+    with pytest.raises(ValueError, match="spike_seq shape mismatch"):
+        malformed(x)
+    torch.testing.assert_close(malformed.v, torch.zeros_like(x[0]))
+    assert malformed.v_seq is None
+
+
 def test_aspy_plif_commits_only_validated_transactional_state(monkeypatch):
     node = neuron.ParametricLIFNode(
         backend="aspy",

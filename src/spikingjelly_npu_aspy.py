@@ -20,6 +20,9 @@ lif_backward = _native.lif_backward
 lif_forward = _native.lif_forward
 plif_backward = _native.plif_backward
 plif_forward = _native.plif_forward
+klif_backward = getattr(_native, "klif_backward", None)
+klif_forward = getattr(_native, "klif_forward", None)
+supports_klif = callable(klif_forward) and callable(klif_backward)
 fedsnn_decay_lif_backward = getattr(_native, "fedsnn_decay_lif_backward", None)
 fedsnn_decay_lif_forward = getattr(_native, "fedsnn_decay_lif_forward", None)
 supports_fedsnn_decay_lif = callable(fedsnn_decay_lif_forward) and callable(
@@ -307,6 +310,108 @@ class _AsPyPLIF(torch.autograd.Function):
         )
 
 
+class _AsPyKLIF(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x_seq: torch.Tensor,
+        v_init: torch.Tensor,
+        k: torch.Tensor,
+        v_threshold: float,
+        v_reset: float,
+        hard_reset: bool,
+        detach_reset: bool,
+        surrogate_alpha: float,
+        tau: float,
+        decay_input: bool,
+        scale_reset: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not supports_klif:
+            raise RuntimeError("loaded AsPy native extension lacks KLIF symbols")
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
+        k = _require_nd(k, "k")
+        spike_seq, v_seq, v_final, h_seq, v_prev_seq = klif_forward(
+            x_seq,
+            v_init,
+            k,
+            v_threshold,
+            v_reset,
+            hard_reset,
+            tau,
+            decay_input,
+            scale_reset,
+        )
+        ctx.save_for_backward(x_seq, v_prev_seq, h_seq, spike_seq, k)
+        ctx.v_threshold = v_threshold
+        ctx.v_reset = v_reset
+        ctx.hard_reset = hard_reset
+        ctx.detach_reset = detach_reset
+        ctx.surrogate_alpha = surrogate_alpha
+        ctx.tau = tau
+        ctx.decay_input = decay_input
+        ctx.scale_reset = scale_reset
+        return spike_seq, v_final, v_seq
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_spike_seq: torch.Tensor | None,
+        grad_v_final: torch.Tensor | None,
+        grad_v_seq: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
+        if torch.is_grad_enabled():
+            raise RuntimeError("AsPy KLIF supports first-order gradients only")
+        x_seq, v_prev_seq, h_seq, spike_seq, k = ctx.saved_tensors
+        if grad_spike_seq is None:
+            grad_spike_seq = torch.zeros_like(spike_seq)
+        else:
+            grad_spike_seq = grad_spike_seq.contiguous()
+        if grad_v_seq is None:
+            grad_v_seq = torch.zeros_like(h_seq)
+        else:
+            grad_v_seq = grad_v_seq.contiguous()
+        if grad_v_final is None:
+            grad_v_final = torch.zeros_like(h_seq[0])
+        else:
+            grad_v_final = grad_v_final.contiguous()
+
+        tensors = {
+            "x_seq": x_seq,
+            "v_prev_seq": v_prev_seq,
+            "h_seq": h_seq,
+            "spike_seq": spike_seq,
+            "grad_spike_seq": grad_spike_seq,
+            "grad_v_seq": grad_v_seq,
+            "grad_v_final": grad_v_final,
+            "k": k,
+        }
+        tensors = {name: _require_nd(value, name) for name, value in tensors.items()}
+        grad_x_seq, grad_v_init, grad_k_partial = klif_backward(
+            tensors["x_seq"],
+            tensors["v_prev_seq"],
+            tensors["h_seq"],
+            tensors["spike_seq"],
+            tensors["grad_spike_seq"],
+            tensors["grad_v_seq"],
+            tensors["grad_v_final"],
+            tensors["k"],
+            ctx.v_threshold,
+            ctx.v_reset,
+            ctx.hard_reset,
+            ctx.detach_reset,
+            ctx.surrogate_alpha,
+            ctx.tau,
+            ctx.decay_input,
+            ctx.scale_reset,
+        )
+        # k is an eight-value repeated native buffer. Return the scalar partial
+        # in one lane; expand(...).contiguous() then reduces it to public k.
+        grad_k = torch.zeros_like(k)
+        grad_k[0] = grad_k_partial.sum()
+        return grad_x_seq, grad_v_init, grad_k, None, None, None, None, None, None, None, None
+
+
 class _AsPyFedSNNDecayLIF(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -510,6 +615,69 @@ def plif_multi_step(
     return spike_seq, v_final, v_seq
 
 
+def klif_multi_step(
+    x_seq: torch.Tensor,
+    v_init: torch.Tensor,
+    k: torch.Tensor,
+    v_threshold: float,
+    v_reset: float | None,
+    detach_reset: bool,
+    surrogate_name: str,
+    surrogate_alpha: float,
+    store_v_seq: bool,
+    tau: float,
+    decay_input: bool,
+    scale_reset: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Run fused KLIF with a dynamic scalar ``k`` tensor."""
+
+    if surrogate_name != "atan":
+        raise ValueError(f"unsupported AsPy surrogate: {surrogate_name!r}")
+    if not supports_klif:
+        raise RuntimeError("loaded AsPy native extension lacks KLIF symbols")
+    if k.numel() != 1:
+        raise ValueError("k must contain exactly one value")
+    if not isinstance(tau, float) or tau <= 1.0:
+        raise ValueError("tau must be a float greater than 1")
+    hard_reset = v_reset is not None
+    reset = 0.0 if v_reset is None else v_reset
+    time_steps = x_seq.shape[0]
+    neuron_count = x_seq[0].numel()
+    aligned_count = (neuron_count + 7) // 8 * 8
+    padding = aligned_count - neuron_count
+    x_native = x_seq.reshape(time_steps, neuron_count)
+    v_native = v_init.reshape(neuron_count)
+    if padding:
+        x_native = torch.cat(
+            (x_native, x_native.new_zeros((time_steps, padding))), dim=1
+        )
+        v_native = torch.cat((v_native, v_native.new_full((padding,), reset)), dim=0)
+
+    # AscendC vector DMA moves one 32-byte block for the dynamic scalar. Keep
+    # the public tensor scalar while presenting eight readable FP32 values to
+    # the native kernel; autograd reduces the repeated view back into k.
+    k_native = k.reshape(1).expand(8).contiguous()
+    spike_native, v_final_native, v_seq_native = _AsPyKLIF.apply(
+        x_native,
+        v_native,
+        k_native,
+        v_threshold,
+        reset,
+        hard_reset,
+        detach_reset,
+        surrogate_alpha,
+        tau,
+        decay_input,
+        scale_reset,
+    )
+    spike_seq = spike_native[:, :neuron_count].reshape_as(x_seq).contiguous()
+    v_final = v_final_native[:neuron_count].reshape_as(v_init).contiguous()
+    if not store_v_seq:
+        return spike_seq, v_final, None
+    v_seq = v_seq_native[:, :neuron_count].reshape_as(x_seq).contiguous()
+    return spike_seq, v_final, v_seq
+
+
 def fedsnn_decay_lif(
     current_seq: torch.Tensor,
     membrane_decay: float,
@@ -558,6 +726,7 @@ def fedsnn_decay_lif(
 __all__ = [
     "fedsnn_decay_lif",
     "if_multi_step",
+    "klif_multi_step",
     "lif_multi_step",
     "plif_multi_step",
 ]

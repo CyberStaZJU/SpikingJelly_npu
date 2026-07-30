@@ -67,6 +67,14 @@ class _AsPyPLIFRequest(_AsPyIFRequest):
 
 
 @dataclass(frozen=True)
+class _AsPyKLIFRequest(_AsPyIFRequest):
+    k: torch.Tensor
+    tau: float
+    decay_input: bool
+    scale_reset: bool
+
+
+@dataclass(frozen=True)
 class _AsPyFedSNNDecayLIFRequest:
     current_seq: torch.Tensor
     membrane_decay: float
@@ -473,6 +481,93 @@ def try_plif_multi_step(
     result = _normalize_result(raw_result, store_v_seq)
     _validate_result(result, request)
     return result, native_route("PLIF")
+
+
+def try_klif_multi_step(
+    x_seq: torch.Tensor,
+    v_init: torch.Tensor,
+    k: torch.Tensor,
+    *,
+    v_threshold: float,
+    v_reset: float | None,
+    detach_reset: bool,
+    surrogate_function: surrogate.SurrogateFunctionBase,
+    store_v_seq: bool,
+    tau: float,
+    decay_input: bool,
+    scale_reset: bool,
+    strict: bool,
+) -> tuple[AsPyIFResult | None, AsPyRoute]:
+    """Run fused KLIF with a dynamic scalar ``k`` or pre-execution fallback."""
+
+    reason = _unsupported_reason(x_seq, v_init, surrogate_function)
+    if reason is None and (not isinstance(tau, float) or tau <= 1.0):
+        reason = "AsPy KLIF requires fixed float tau greater than 1"
+    if reason is None and (
+        k.device != x_seq.device
+        or k.dtype != torch.float32
+        or k.numel() != 1
+        or not k.is_contiguous()
+        or k.storage_offset() != 0
+    ):
+        reason = (
+            "AsPy KLIF k must be a contiguous FP32 scalar tensor "
+            "on the input NPU with storage offset zero"
+        )
+    if reason is None:
+        format_reason = _require_npu_nd(k)
+        if format_reason is not None:
+            reason = f"AsPy KLIF k is not bridge-safe: {format_reason}"
+    if reason is not None:
+        if strict:
+            raise AsPyBackendError(reason)
+        return None, eager_route("aspy", reason)
+
+    extension, load_error = _load_extension()
+    if extension is None:
+        assert load_error is not None
+        if strict:
+            raise AsPyBackendError(load_error)
+        return None, eager_route("aspy", load_error)
+
+    implementation = getattr(extension, "klif_multi_step", None)
+    if not callable(implementation):
+        reason = "AsPy extension does not provide callable klif_multi_step"
+        if strict:
+            raise AsPyBackendError(reason)
+        return None, eager_route("aspy", reason)
+
+    request = _AsPyKLIFRequest(
+        x_seq=x_seq,
+        v_init=v_init,
+        k=k,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+        detach_reset=detach_reset,
+        surrogate_name="atan",
+        surrogate_alpha=float(surrogate_function.alpha),
+        store_v_seq=store_v_seq,
+        tau=tau,
+        decay_input=decay_input,
+        scale_reset=scale_reset,
+    )
+    raw_result = implementation(
+        request.x_seq,
+        request.v_init,
+        request.k,
+        request.v_threshold,
+        request.v_reset,
+        request.detach_reset,
+        request.surrogate_name,
+        request.surrogate_alpha,
+        request.store_v_seq,
+        request.tau,
+        request.decay_input,
+        request.scale_reset,
+    )
+    result = _normalize_result(raw_result, store_v_seq)
+    _validate_result(result, request)
+    return result, native_route("KLIF")
 
 
 def try_fedsnn_decay_lif(

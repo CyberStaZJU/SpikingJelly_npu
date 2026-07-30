@@ -199,6 +199,10 @@ if missing_generic:
 print(
     json.dumps(
         {
+            "klif": all(
+                callable(getattr(module, name, None))
+                for name in ("klif_forward", "klif_backward")
+            ),
             "fedsnn_decay_lif": all(
                 callable(getattr(module, name, None))
                 for name in (
@@ -213,6 +217,16 @@ print(
 PY
 )"
   printf 'AsPy capabilities: %s\n' "$CAPABILITIES_JSON"
+  if ! "$PYTHON_BIN" - "$CAPABILITIES_JSON" <<'PY'
+import json
+import sys
+
+raise SystemExit(0 if json.loads(sys.argv[1]).get("klif") is True else 1)
+PY
+  then
+    echo "Warning: the selected release bundle lacks the KLIF forward/backward symbols." >&2
+    echo "KLIF backend='aspy' will fall back or fail in strict mode; build current main from source for KLIF." >&2
+  fi
   if ! "$PYTHON_BIN" - "$CAPABILITIES_JSON" <<'PY'
 import json
 import sys

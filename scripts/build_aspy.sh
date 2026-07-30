@@ -242,6 +242,22 @@ MSOPGEN_VERSION="$($MSOPGEN --version 2>&1 | head -1 || printf unavailable)"
   -op AsPyLifBackward \
   -lan cpp
 "$MSOPGEN" gen \
+  -i "$SOURCE/definition/aspy_klif_forward.json" \
+  -f aclnn \
+  -c ai_core-ascend910b \
+  -out "$PROJECT" \
+  -m 1 \
+  -op AsPyKlifForward \
+  -lan cpp
+"$MSOPGEN" gen \
+  -i "$SOURCE/definition/aspy_klif_forward.json" \
+  -f aclnn \
+  -c ai_core-ascend910b \
+  -out "$PROJECT" \
+  -m 1 \
+  -op AsPyKlifBackward \
+  -lan cpp
+"$MSOPGEN" gen \
   -i "$SOURCE/definition/aspy_plif_forward.json" \
   -f aclnn \
   -c ai_core-ascend910b \
@@ -269,6 +285,10 @@ install -m 0644 "$SOURCE/op_host/as_py_lif_forward.cpp" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_lif_forward_tiling.h" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_lif_backward.cpp" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_lif_backward_tiling.h" "$PROJECT/op_host/"
+install -m 0644 "$SOURCE/op_host/as_py_klif_forward.cpp" "$PROJECT/op_host/"
+install -m 0644 "$SOURCE/op_host/as_py_klif_forward_tiling.h" "$PROJECT/op_host/"
+install -m 0644 "$SOURCE/op_host/as_py_klif_backward.cpp" "$PROJECT/op_host/"
+install -m 0644 "$SOURCE/op_host/as_py_klif_backward_tiling.h" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_plif_forward.cpp" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_plif_forward_tiling.h" "$PROJECT/op_host/"
 install -m 0644 "$SOURCE/op_host/as_py_plif_backward.cpp" "$PROJECT/op_host/"
@@ -279,6 +299,8 @@ install -m 0644 "$SOURCE/op_kernel/as_py_if_forward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/as_py_if_backward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/as_py_lif_forward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/as_py_lif_backward.cpp" "$PROJECT/op_kernel/"
+install -m 0644 "$SOURCE/op_kernel/as_py_klif_forward.cpp" "$PROJECT/op_kernel/"
+install -m 0644 "$SOURCE/op_kernel/as_py_klif_backward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/as_py_plif_forward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/as_py_plif_backward.cpp" "$PROJECT/op_kernel/"
 install -m 0644 "$SOURCE/op_kernel/CMakeLists.txt" "$PROJECT/op_kernel/"
@@ -327,6 +349,8 @@ required = (
     "if_backward",
     "lif_forward",
     "lif_backward",
+    "klif_forward",
+    "klif_backward",
     "plif_forward",
     "plif_backward",
     "fedsnn_decay_lif_forward",

@@ -244,6 +244,105 @@ class LIFNode(BaseNode):
         return f"{super().extra_repr()}, tau={self.tau}, decay_input={self.decay_input}"
 
 
+class KLIFNode(LIFNode):
+    """K-based LIF neuron compatible with SpikingJelly's public KLIF API.
+
+    KLIF applies ``relu(k * h)`` after the ordinary LIF charge and before
+    firing. ``k`` is a learnable scalar. When ``scale_reset=True``, the
+    post-fire reset operates on voltage and threshold divided by ``k``.
+    """
+
+    def __init__(
+        self,
+        scale_reset: bool = False,
+        tau: float = 2.0,
+        decay_input: bool = True,
+        v_threshold: float = 1.0,
+        v_reset: float | None = 0.0,
+        surrogate_function: surrogate.SurrogateFunctionBase | None = None,
+        detach_reset: bool = False,
+        step_mode: str = "s",
+        backend: str = "torch",
+        store_v_seq: bool = False,
+        backend_strict: bool = False,
+    ) -> None:
+        super().__init__(
+            tau=tau,
+            decay_input=decay_input,
+            v_threshold=v_threshold,
+            v_reset=v_reset,
+            surrogate_function=surrogate_function,
+            detach_reset=detach_reset,
+            step_mode=step_mode,
+            backend=backend,
+            store_v_seq=store_v_seq,
+            backend_strict=backend_strict,
+        )
+        self.scale_reset = bool(scale_reset)
+        self.k = nn.Parameter(torch.as_tensor(1.0))
+
+    def neuronal_charge(self, x: torch.Tensor) -> None:
+        super().neuronal_charge(x)
+        self.v = torch.relu(self.k * self.v)
+
+    def neuronal_reset(self, spike: torch.Tensor) -> None:
+        spike_for_reset = spike.detach() if self.detach_reset else spike
+        if self.scale_reset:
+            voltage = self.v / self.k
+            threshold = self.v_threshold / self.k
+        else:
+            voltage = self.v
+            threshold = self.v_threshold
+        if self.v_reset is None:
+            self.v = voltage - spike_for_reset * threshold
+        else:
+            self.v = spike_for_reset * self.v_reset + (1.0 - spike_for_reset) * voltage
+
+    def single_step_forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.backend == "aspy":
+            reason = "AsPy KLIF acceleration supports multi-step only"
+            if self.backend_strict:
+                raise _aspy.AsPyBackendError(reason)
+            self.last_backend_route = _aspy.eager_route(
+                "aspy", f"{reason}; using PyTorch single-step"
+            )
+        return BaseNode.single_step_forward(self, x)
+
+    def multi_step_forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        if x_seq.ndim < 2:
+            raise ValueError(f"expected [T, N, ...], got shape={tuple(x_seq.shape)}")
+        if self.backend != "aspy":
+            return BaseNode.multi_step_forward(self, x_seq)
+
+        self.v_float_to_tensor(x_seq[0])
+        k = self.k.to(dtype=x_seq.dtype, device=x_seq.device)
+        result, route = _aspy.try_klif_multi_step(
+            x_seq,
+            self.v,
+            k,
+            v_threshold=self.v_threshold,
+            v_reset=self.v_reset,
+            detach_reset=self.detach_reset,
+            surrogate_function=self.surrogate_function,
+            store_v_seq=self.store_v_seq,
+            tau=self.tau,
+            decay_input=self.decay_input,
+            scale_reset=self.scale_reset,
+            strict=self.backend_strict,
+        )
+        self.last_backend_route = route
+        if result is None:
+            return self._torch_multi_step_forward(x_seq)
+
+        self.v = result.v_final
+        if self.store_v_seq:
+            self.v_seq = result.v_seq
+        return result.spike_seq
+
+    def extra_repr(self) -> str:
+        return f"{super().extra_repr()}, scale_reset={self.scale_reset}"
+
+
 class ParametricLIFNode(BaseNode):
     """LIF neuron with learnable reciprocal time constant ``sigmoid(w)``."""
 
@@ -328,4 +427,4 @@ class ParametricLIFNode(BaseNode):
         return f"{super().extra_repr()}, decay_input={self.decay_input}"
 
 
-__all__ = ["BaseNode", "IFNode", "LIFNode", "ParametricLIFNode"]
+__all__ = ["BaseNode", "IFNode", "LIFNode", "KLIFNode", "ParametricLIFNode"]

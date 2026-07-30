@@ -15,6 +15,8 @@ def install_fake_native(
     lif_backward=None,
     plif_forward=None,
     plif_backward=None,
+    klif_forward=None,
+    klif_backward=None,
     fedsnn_decay_lif_forward=None,
     fedsnn_decay_lif_backward=None,
     include_fedsnn_symbols=True,
@@ -26,6 +28,8 @@ def install_fake_native(
         "lif_backward": (lambda *args: None) if lif_backward is None else lif_backward,
         "plif_forward": forward if plif_forward is None else plif_forward,
         "plif_backward": (lambda *args: None) if plif_backward is None else plif_backward,
+        "klif_forward": forward if klif_forward is None else klif_forward,
+        "klif_backward": (lambda *args: None) if klif_backward is None else klif_backward,
     }
     if include_fedsnn_symbols:
         symbols.update(
@@ -366,6 +370,110 @@ def test_aspy_plif_adapter_dynamic_scalar_padding_gradient_and_cropping(monkeypa
     torch.testing.assert_close(x_seq.grad, torch.full_like(x_seq, 2.0))
     torch.testing.assert_close(v_init.grad, torch.full_like(v_init, 3.0))
     torch.testing.assert_close(reciprocal_tau.grad, torch.tensor([36.0]))
+
+
+def test_aspy_klif_adapter_dynamic_k_padding_gradient_and_cropping(monkeypatch):
+    calls = []
+
+    def klif_forward(x_seq, v_init, k, *attributes):
+        calls.append((x_seq, v_init, k, attributes))
+        return (
+            torch.ones_like(x_seq),
+            torch.full_like(x_seq, 0.25),
+            torch.full_like(v_init, 0.25),
+            torch.full_like(x_seq, 0.5),
+            torch.full_like(x_seq, 0.125),
+        )
+
+    def klif_backward(*args):
+        calls.append(args)
+        x_seq, _, _, _, _, _, grad_v_final, k = args[:8]
+        return (
+            torch.full_like(x_seq, 2.0),
+            torch.full_like(grad_v_final, 3.0),
+            torch.arange(1, grad_v_final.numel() + 1, dtype=grad_v_final.dtype).reshape_as(
+                grad_v_final
+            ),
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        klif_forward=klif_forward,
+        klif_backward=klif_backward,
+    )
+    x_seq = torch.zeros(2, 1, 1, requires_grad=True)
+    v_init = torch.zeros(1, 1, requires_grad=True)
+    k = torch.tensor(1.25, requires_grad=True)
+
+    spike_seq, v_final, v_seq = adapter.klif_multi_step(
+        x_seq,
+        v_init,
+        k,
+        1.0,
+        0.5,
+        False,
+        "atan",
+        2.0,
+        True,
+        2.5,
+        True,
+        True,
+    )
+    (spike_seq.sum() + v_final.sum() + v_seq.sum()).backward()
+
+    forward_call = calls[0]
+    assert forward_call[0].shape == (2, 8)
+    torch.testing.assert_close(forward_call[1][1:], torch.full((7,), 0.5))
+    torch.testing.assert_close(forward_call[2], k.expand(8))
+    assert forward_call[2].shape == (8,)
+    assert forward_call[2].grad_fn is not None
+    assert forward_call[3] == (1.0, 0.5, True, 2.5, True, True)
+    torch.testing.assert_close(x_seq.grad, torch.full_like(x_seq, 2.0))
+    torch.testing.assert_close(v_init.grad, torch.full_like(v_init, 3.0))
+    torch.testing.assert_close(k.grad, torch.tensor(36.0))
+
+
+def test_aspy_klif_adapter_rejects_higher_order_gradients(monkeypatch):
+    def klif_forward(x_seq, v_init, k, *attributes):
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.zeros_like(v_init),
+            torch.full_like(x_seq, 0.5),
+            torch.zeros_like(x_seq),
+        )
+
+    def klif_backward(x_seq, *args):
+        grad_v_final = args[5]
+        return torch.ones_like(x_seq), torch.ones_like(grad_v_final), torch.ones_like(
+            grad_v_final
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        klif_forward=klif_forward,
+        klif_backward=klif_backward,
+    )
+    x_seq = torch.zeros(2, 1, 1, requires_grad=True)
+    k = torch.tensor(1.0, requires_grad=True)
+    spike_seq, _, _ = adapter.klif_multi_step(
+        x_seq,
+        torch.zeros(1, 1),
+        k,
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+        2.0,
+        True,
+        False,
+    )
+    with pytest.raises(RuntimeError, match="first-order gradients only"):
+        torch.autograd.grad(spike_seq.sum(), (x_seq, k), create_graph=True)
 
 
 def test_aspy_fedsnn_decay_lif_adapter_pads_crops_and_dispatches_backward(monkeypatch):

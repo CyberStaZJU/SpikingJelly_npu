@@ -9,6 +9,8 @@ add_kernel_compile(AsPyIfForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_forward.cp
 add_kernel_compile(AsPyIfBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_backward.cpp)
 add_kernel_compile(AsPyLifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_forward.cpp)
 add_kernel_compile(AsPyLifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_backward.cpp)
+add_kernel_compile(AsPyKlifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_klif_forward.cpp)
+add_kernel_compile(AsPyKlifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_klif_backward.cpp)
 add_kernel_compile(AsPyPlifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_plif_forward.cpp)
 add_kernel_compile(AsPyPlifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_plif_backward.cpp)
 

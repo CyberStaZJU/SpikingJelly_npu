@@ -839,6 +839,80 @@ def test_aspy_plif_cross_tile_state_chain_and_gradients(decay_input):
     torch.testing.assert_close(accelerated.w.grad, reference.w.grad, rtol=3e-5, atol=3e-6)
 
 
+@pytest.mark.parametrize("shape", [(5, 3, 7), (3, 1, 4097), (2, 1, 1)])
+@pytest.mark.parametrize("scale_reset", [False, True])
+@pytest.mark.parametrize("decay_input", [False, True])
+@pytest.mark.parametrize("v_reset", [None, 0.0])
+@pytest.mark.parametrize("detach_reset", [False, True])
+def test_aspy_klif_full_remainder_singleton_forward_state_and_gradients(
+    shape, scale_reset, decay_input, v_reset, detach_reset
+):
+    device = require_native_aspy()
+    torch.manual_seed(20260910)
+    x_reference = torch.rand(shape, dtype=torch.float32, device=device, requires_grad=True)
+    x_accelerated = x_reference.detach().clone().requires_grad_(True)
+    kwargs = {
+        "scale_reset": scale_reset,
+        "tau": 2.5,
+        "decay_input": decay_input,
+        "v_threshold": 0.7,
+        "v_reset": v_reset,
+        "surrogate_function": surrogate.ATan(alpha=2.5),
+        "detach_reset": detach_reset,
+        "step_mode": "m",
+        "store_v_seq": True,
+    }
+    reference = neuron.KLIFNode(backend="torch", **kwargs).to(device)
+    accelerated = neuron.KLIFNode(
+        backend="aspy", backend_strict=True, **kwargs
+    ).to(device)
+    initial_reference = torch.linspace(
+        0.05, 0.35, x_reference[0].numel(), dtype=x_reference.dtype, device=device
+    ).reshape_as(x_reference[0]).requires_grad_(True)
+    initial_accelerated = initial_reference.detach().clone().requires_grad_(True)
+    reference.v = initial_reference
+    accelerated.v = initial_accelerated
+    with torch.no_grad():
+        reference.k.fill_(1.25)
+        accelerated.k.copy_(reference.k)
+
+    expected = reference(x_reference)
+    actual = accelerated(x_accelerated)
+    spike_weight = torch.linspace(
+        0.25, 1.25, expected.numel(), dtype=expected.dtype, device=device
+    ).reshape_as(expected)
+    voltage_weight = torch.linspace(
+        0.1, 0.9, reference.v_seq.numel(), dtype=reference.v_seq.dtype, device=device
+    ).reshape_as(reference.v_seq)
+    final_weight = torch.linspace(
+        0.5, 1.5, reference.v.numel(), dtype=reference.v.dtype, device=device
+    ).reshape_as(reference.v)
+    reference_loss = (
+        (expected * spike_weight).sum()
+        + (reference.v_seq * voltage_weight).sum()
+        + (reference.v * final_weight).sum()
+    )
+    accelerated_loss = (
+        (actual * spike_weight).sum()
+        + (accelerated.v_seq * voltage_weight).sum()
+        + (accelerated.v * final_weight).sum()
+    )
+    reference_loss.backward()
+    accelerated_loss.backward()
+    torch.npu.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(accelerated.v_seq, reference.v_seq, rtol=5e-5, atol=3e-5)
+    torch.testing.assert_close(accelerated.v, reference.v, rtol=5e-5, atol=3e-5)
+    torch.testing.assert_close(x_accelerated.grad, x_reference.grad, rtol=5e-5, atol=3e-5)
+    torch.testing.assert_close(
+        initial_accelerated.grad, initial_reference.grad, rtol=5e-5, atol=3e-5
+    )
+    torch.testing.assert_close(accelerated.k.grad, reference.k.grad, rtol=5e-5, atol=3e-5)
+    assert accelerated.last_backend_route.backend == "aspy"
+    assert accelerated.last_backend_route.reason == "Ascend C fused multi-step KLIF kernel"
+
+
 class _BatchFirstAsPyPLIF(torch.nn.Module):
     _spikingjelly_npu_graph_safe = True
 
