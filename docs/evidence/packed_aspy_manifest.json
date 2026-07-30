@@ -1,0 +1,53 @@
+{
+  "evidence_source": "externally collected on the qualified FedSNN Ascend 910B4 workflow; copied here as immutable final summaries",
+  "external_artifacts": {
+    "fedsnn_parity_tests.log": {
+      "included_in_repository": false,
+      "sha256": "a69e85904ffcf22481fbdbf40adaac960c9dc9fe4ea3755a1a648743236da9b9"
+    },
+    "fedsnn_route_gate.log": {
+      "included_in_repository": false,
+      "sha256": "9f5ea280b43f48eafece430c5053b54cda496674ca1b9aeb567bc6a148642258"
+    },
+    "fedsnn_smoke_run1.log": {
+      "included_in_repository": false,
+      "sha256": "b30b815027ecaee804dc290f5687a7382f62884925d52ef6b0fcc319313bd6c3"
+    },
+    "fedsnn_smoke_run2.log": {
+      "included_in_repository": false,
+      "sha256": "0bc58a367d37f0054d0c40d6c199beb58912bc0ecd898d946421c43d774442ce"
+    }
+  },
+  "files": {
+    "actual_model_acceptance_policy.json": {
+      "bytes": 518,
+      "exists": true,
+      "sha256": "94654ff7d9d0dce1317527296280a710a7a0e4f1cfd279b249c733d9f2ba4058"
+    },
+    "fedsnn_client_benchmark.json": {
+      "bytes": 31480,
+      "exists": true,
+      "sha256": "e75ada731c30d1aaf85a1f5a29d51c4a27f0c2f4ef999227069d9ebd1fb0ce1a"
+    },
+    "stage_profile_summary.json": {
+      "bytes": 2856,
+      "exists": true,
+      "sha256": "d0ca53e26017b904bc8509c71802e25fc107f1defd662a77ef630097ad7e347e"
+    }
+  },
+  "identities": {
+    "fedsnn_consumer_base_git_head": "386c9a418f010dd5a90bac9519b78cdc2e708765",
+    "fedsnn_frozen_qualification_archive_sha256": "b16ed36cb100348d881e3ff95583d64141f115842368b2f0013aaeecc6c1c18c",
+    "native_build_root_identity": "6db7254534e8381224f0a6a3089ffb5fce0640282d8c65fe1611f9d5653fb0f4",
+    "resolved_smoke_config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+    "spikingjelly_npu_base_git_head": "9b7fa67832df01303d5a2037ef3848a6052e36d3",
+    "spikingjelly_npu_qualified_tree_sha256": "928428318bded45ca1277c9d3449cb146e099a2e4179aba0ba280eee0fd21104"
+  },
+  "identity_note": "The FedSNN packed_aspy integration was qualified from a frozen archive based on the stated Git HEAD plus task-scoped uncommitted adapter/test changes. It was not represented by a public clean FedSNN commit at qualification time. External log hashes identify retained evidence but those logs are not shipped in this repository.",
+  "qualification_date": "2026-07-30",
+  "source_repositories": {
+    "branch": "main",
+    "fedsnn_git_head": "386c9a418f010dd5a90bac9519b78cdc2e708765",
+    "spikingjelly_npu_base_head": "9b7fa67832df01303d5a2037ef3848a6052e36d3"
+  }
+}

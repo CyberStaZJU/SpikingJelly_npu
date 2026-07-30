@@ -7,6 +7,8 @@ fallback rather than a package import failure.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from spikingjelly_npu._native import load_aspy_native
@@ -18,6 +20,41 @@ lif_backward = _native.lif_backward
 lif_forward = _native.lif_forward
 plif_backward = _native.plif_backward
 plif_forward = _native.plif_forward
+fedsnn_decay_lif_backward = getattr(_native, "fedsnn_decay_lif_backward", None)
+fedsnn_decay_lif_forward = getattr(_native, "fedsnn_decay_lif_forward", None)
+supports_fedsnn_decay_lif = callable(fedsnn_decay_lif_forward) and callable(
+    fedsnn_decay_lif_backward
+)
+
+
+def _npu_format(tensor: torch.Tensor) -> int | None:
+    if tensor.device.type != "npu":
+        return None
+    import torch_npu
+
+    get_format = getattr(torch_npu, "get_npu_format", None)
+    if not callable(get_format):
+        get_format = torch.ops.npu.get_npu_format
+    return int(get_format(tensor))
+
+
+def _require_nd(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    """Fail before native execution unless a tensor is physical ND."""
+
+    actual_format = _npu_format(tensor)
+    if actual_format is not None and actual_format != 2:
+        raise RuntimeError(
+            f"{name} must use physical ACL_FORMAT_ND (2), got format={actual_format}"
+        )
+    return tensor
+
+
+def _copy_to_nd(tensor: torch.Tensor) -> torch.Tensor:
+    """Return physical ND without relying on npu_format_cast autograd support."""
+
+    if tensor.device.type != "npu" or _npu_format(tensor) == 2:
+        return tensor
+    return tensor.clone()
 
 
 class _AsPyIF(torch.autograd.Function):
@@ -32,6 +69,8 @@ class _AsPyIF(torch.autograd.Function):
         detach_reset: bool,
         surrogate_alpha: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
         spike_seq, v_seq, v_final, h_seq = if_forward(
             x_seq,
             v_init,
@@ -70,6 +109,11 @@ class _AsPyIF(torch.autograd.Function):
         else:
             grad_v_final = grad_v_final.contiguous()
 
+        h_seq = _require_nd(h_seq, "h_seq")
+        spike_seq = _require_nd(spike_seq, "spike_seq")
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        grad_v_seq = _require_nd(grad_v_seq, "grad_v_seq")
+        grad_v_final = _require_nd(grad_v_final, "grad_v_final")
         grad_x_seq, grad_v_init = if_backward(
             h_seq,
             spike_seq,
@@ -99,6 +143,8 @@ class _AsPyLIF(torch.autograd.Function):
         tau: float,
         decay_input: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
         spike_seq, v_seq, v_final, h_seq = lif_forward(
             x_seq,
             v_init,
@@ -141,6 +187,11 @@ class _AsPyLIF(torch.autograd.Function):
         else:
             grad_v_final = grad_v_final.contiguous()
 
+        h_seq = _require_nd(h_seq, "h_seq")
+        spike_seq = _require_nd(spike_seq, "spike_seq")
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        grad_v_seq = _require_nd(grad_v_seq, "grad_v_seq")
+        grad_v_final = _require_nd(grad_v_final, "grad_v_final")
         grad_x_seq, grad_v_init = lif_backward(
             h_seq,
             spike_seq,
@@ -172,6 +223,9 @@ class _AsPyPLIF(torch.autograd.Function):
         surrogate_alpha: float,
         decay_input: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
+        reciprocal_tau = _require_nd(reciprocal_tau, "reciprocal_tau")
         spike_seq, v_seq, v_final, h_seq, v_prev_seq = plif_forward(
             x_seq,
             v_init,
@@ -213,6 +267,14 @@ class _AsPyPLIF(torch.autograd.Function):
         else:
             grad_v_final = grad_v_final.contiguous()
 
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_prev_seq = _require_nd(v_prev_seq, "v_prev_seq")
+        h_seq = _require_nd(h_seq, "h_seq")
+        spike_seq = _require_nd(spike_seq, "spike_seq")
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        grad_v_seq = _require_nd(grad_v_seq, "grad_v_seq")
+        grad_v_final = _require_nd(grad_v_final, "grad_v_final")
+        reciprocal_tau = _require_nd(reciprocal_tau, "reciprocal_tau")
         grad_x_seq, grad_v_init, grad_reciprocal_tau_partial = plif_backward(
             x_seq,
             v_prev_seq,
@@ -243,6 +305,59 @@ class _AsPyPLIF(torch.autograd.Function):
             None,
             None,
         )
+
+
+class _AsPyFedSNNDecayLIF(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        current_seq: torch.Tensor,
+        membrane_decay: float,
+        v_threshold: float,
+        surrogate_alpha: float,
+    ) -> torch.Tensor:
+        if not supports_fedsnn_decay_lif:
+            raise RuntimeError(
+                "loaded AsPy native extension lacks FedSNN decay-LIF symbols"
+            )
+        current_seq = _require_nd(current_seq, "current_seq")
+        spike_seq, h_seq = fedsnn_decay_lif_forward(
+            current_seq,
+            membrane_decay,
+            v_threshold,
+        )
+        h_seq = _require_nd(h_seq, "h_seq")
+        ctx.save_for_backward(h_seq)
+        ctx.membrane_decay = membrane_decay
+        ctx.v_threshold = v_threshold
+        ctx.surrogate_alpha = surrogate_alpha
+        return spike_seq
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_spike_seq: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
+        if torch.is_grad_enabled():
+            raise RuntimeError("AsPy FedSNN decay-LIF supports first-order gradients only")
+        (h_seq,) = ctx.saved_tensors
+        if grad_spike_seq is None:
+            grad_spike_seq = torch.zeros_like(h_seq)
+        else:
+            grad_spike_seq = _copy_to_nd(grad_spike_seq.contiguous())
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        if not supports_fedsnn_decay_lif:
+            raise RuntimeError(
+                "loaded AsPy native extension lacks FedSNN decay-LIF symbols"
+            )
+        grad_current_seq = fedsnn_decay_lif_backward(
+            h_seq,
+            grad_spike_seq,
+            ctx.membrane_decay,
+            ctx.v_threshold,
+            ctx.surrogate_alpha,
+        )
+        return grad_current_seq, None, None, None
 
 
 def if_multi_step(
@@ -395,4 +510,54 @@ def plif_multi_step(
     return spike_seq, v_final, v_seq
 
 
-__all__ = ["if_multi_step", "lif_multi_step", "plif_multi_step"]
+def fedsnn_decay_lif(
+    current_seq: torch.Tensor,
+    membrane_decay: float,
+    v_threshold: float,
+    surrogate_name: str,
+    surrogate_alpha: float,
+) -> torch.Tensor:
+    """Run the exact stateless FedSNN decay-LIF forward/backward."""
+
+    if surrogate_name != "atan":
+        raise ValueError(f"unsupported AsPy surrogate: {surrogate_name!r}")
+    if not supports_fedsnn_decay_lif:
+        raise RuntimeError("loaded AsPy native extension lacks FedSNN decay-LIF symbols")
+    if not isinstance(membrane_decay, float) or not 0.0 <= membrane_decay <= 1.0:
+        raise ValueError("membrane_decay must be a float in [0, 1]")
+    if not math.isfinite(v_threshold):
+        raise ValueError("v_threshold must be finite")
+    if not math.isfinite(surrogate_alpha) or surrogate_alpha <= 0.0:
+        raise ValueError("surrogate_alpha must be finite and positive")
+    if current_seq.ndim < 2:
+        raise ValueError("current_seq must be [T, N, ...]")
+    time_steps = current_seq.shape[0]
+    if time_steps == 0:
+        raise ValueError("current_seq time dimension must be non-empty")
+    neuron_count = current_seq.numel() // time_steps
+    if neuron_count == 0:
+        raise ValueError("current_seq flattened time-step size must be non-empty")
+    aligned_count = (neuron_count + 7) // 8 * 8
+    padding = aligned_count - neuron_count
+    current_native = _copy_to_nd(current_seq.reshape(time_steps, neuron_count))
+    current_native = _require_nd(current_native, "current_seq")
+    if padding:
+        current_native = torch.cat(
+            (current_native, current_native.new_zeros((time_steps, padding))),
+            dim=1,
+        )
+    spike_native = _AsPyFedSNNDecayLIF.apply(
+        current_native,
+        membrane_decay,
+        v_threshold,
+        surrogate_alpha,
+    )
+    return spike_native[:, :neuron_count].reshape_as(current_seq).contiguous()
+
+
+__all__ = [
+    "fedsnn_decay_lif",
+    "if_multi_step",
+    "lif_multi_step",
+    "plif_multi_step",
+]

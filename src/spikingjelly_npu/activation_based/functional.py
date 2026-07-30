@@ -13,7 +13,7 @@ from . import base
 
 
 def _as_modules(module_or_modules: Any) -> tuple[Callable[[Tensor], Tensor], ...]:
-    if isinstance(module_or_modules, (list, tuple, nn.Sequential)):
+    if isinstance(module_or_modules, list | tuple | nn.Sequential):
         return tuple(module_or_modules)
     return (module_or_modules,)
 

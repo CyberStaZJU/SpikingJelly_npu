@@ -7,10 +7,12 @@ batches, and makes the complete fixed-shape forward safe for NPUGraph capture.
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 
-from .activation_based import layer, surrogate
+from .activation_based import _aspy, layer, surrogate
 
 
 class PoissonEncoder(nn.Module):
@@ -58,6 +60,98 @@ class MultiStepIF(nn.Module):
                 membrane = reset_spike * self.v_reset + (1.0 - reset_spike) * membrane
             spikes.append(spike)
         return torch.stack(spikes)
+
+
+class FedSNNDecayLIF(nn.Module):
+    """Stateless FedSNN decay-LIF scan with an exact optional AsPy route.
+
+    Every forward starts from a zero membrane and returns only the spike
+    sequence. The qualified native path is intentionally narrow: FP32,
+    contiguous, storage-offset-zero NPU input, spiking ATan surrogate, soft
+    reset, and detached reset. All other requests fall back before execution,
+    unless ``backend_strict=True``.
+    """
+
+    def __init__(
+        self,
+        membrane_decay: float,
+        v_threshold: float = 1.0,
+        surrogate_function: surrogate.SurrogateFunctionBase | None = None,
+        *,
+        backend: str = "torch",
+        backend_strict: bool = False,
+    ) -> None:
+        super().__init__()
+        if not isinstance(membrane_decay, float) or not 0.0 <= membrane_decay <= 1.0:
+            raise ValueError("membrane_decay must be a float in [0, 1]")
+        if not math.isfinite(v_threshold):
+            raise ValueError("v_threshold must be finite")
+        if backend not in {"torch", "aspy"}:
+            raise NotImplementedError("DecayLIF backend must be 'torch' or 'aspy'")
+        self.membrane_decay = membrane_decay
+        self.v_threshold = float(v_threshold)
+        self.surrogate_function = (
+            surrogate.ATan() if surrogate_function is None else surrogate_function
+        )
+        if isinstance(self.surrogate_function, surrogate.ATan) and (
+            not math.isfinite(self.surrogate_function.alpha)
+            or self.surrogate_function.alpha <= 0.0
+        ):
+            raise ValueError("ATan surrogate alpha must be finite and positive")
+        self.backend = backend
+        self.backend_strict = bool(backend_strict)
+        self.last_backend_route = _aspy.eager_route(
+            backend, "backend has not executed yet"
+        )
+
+    def _torch_forward(self, current_seq: Tensor) -> Tensor:
+        membrane = torch.zeros_like(current_seq[0])
+        spikes = []
+        for t in range(current_seq.shape[0]):
+            charged = membrane * self.membrane_decay
+            charged = charged + current_seq[t]
+            spike = self.surrogate_function(charged - self.v_threshold)
+            membrane = charged - spike.detach() * self.v_threshold
+            spikes.append(spike)
+        return torch.stack(spikes)
+
+    def forward(self, current_seq: Tensor) -> Tensor:
+        if current_seq.ndim < 2:
+            raise ValueError(
+                f"expected [T, N, ...], got shape={tuple(current_seq.shape)}"
+            )
+        if current_seq.shape[0] == 0:
+            raise ValueError("DecayLIF requires at least one time step")
+        if current_seq[0].numel() == 0:
+            raise ValueError("DecayLIF requires at least one neuron per time step")
+        if self.backend != "aspy":
+            self.last_backend_route = _aspy.eager_route(
+                self.backend,
+                f"backend={self.backend!r} uses the exact PyTorch implementation",
+            )
+            return self._torch_forward(current_seq)
+
+        spike_seq, route = _aspy.try_fedsnn_decay_lif(
+            current_seq,
+            membrane_decay=self.membrane_decay,
+            v_threshold=self.v_threshold,
+            surrogate_function=self.surrogate_function,
+            strict=self.backend_strict,
+        )
+        self.last_backend_route = route
+        if spike_seq is None:
+            return self._torch_forward(current_seq)
+        return spike_seq
+
+    def extra_repr(self) -> str:
+        return (
+            f"membrane_decay={self.membrane_decay}, "
+            f"v_threshold={self.v_threshold}, backend={self.backend}, "
+            f"backend_strict={self.backend_strict}"
+        )
+
+
+DecayLIF = FedSNNDecayLIF
 
 
 class MultiStepLIF(nn.Module):
@@ -357,6 +451,8 @@ class PackedBNTTMLP(nn.Module):
 __all__ = [
     "PoissonEncoder",
     "MultiStepIF",
+    "FedSNNDecayLIF",
+    "DecayLIF",
     "MultiStepLIF",
     "BNTT1d",
     "BNTT2d",

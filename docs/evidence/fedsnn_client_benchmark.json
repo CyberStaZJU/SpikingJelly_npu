@@ -1,0 +1,926 @@
+{
+  "acceptance": "packed_aspy median strictly lower than both baselines",
+  "results": [
+    {
+      "backend": "legacy_stepwise",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 0,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle0_pos0_legacy_stepwise.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.4955838620662689,
+        "final_state_sha256": "6bee5ceb67dd73f028a404ee707ad41d53a6ed384e761a74758533fcdb6ee10d",
+        "final_state_summary": {
+          "parameter_abs_max": 1.005253791809082,
+          "parameter_abs_sum": 66128.71851596987,
+          "parameter_l2": 97.16112990587057
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 70
+        },
+        "wall_sec": 5.282152342610061
+      },
+      "position": 0,
+      "process_elapsed_sec": 23.960987200029194,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.927520751953125,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 14
+        },
+        "wall_sec": 14.897214592434466
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_eager",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 0,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle0_pos1_packed_eager.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.3849965035915375,
+        "final_state_sha256": "7406a3a42fb3e2353d1b2b9bc5db23bca3ae225e8ea25c3f99bf2a24aca3e303",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0046334266662598,
+          "parameter_abs_sum": 66127.4513340125,
+          "parameter_l2": 97.16185082338296
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 70
+        },
+        "wall_sec": 4.865568535402417
+      },
+      "position": 1,
+      "process_elapsed_sec": 23.66341984178871,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.7445793151855469,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 14
+        },
+        "wall_sec": 15.03097354248166
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_aspy",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 0,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle0_pos2_packed_aspy.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.41807207465171814,
+        "final_state_sha256": "b344f3667c91c9c7065f36c7c5768b8890b855ce601a8d095acf031f3d91acb7",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0045992136001587,
+          "parameter_abs_sum": 66115.55490600027,
+          "parameter_l2": 97.1608859873312
+        },
+        "forwards": 70,
+        "native_lif_calls": 420,
+        "route_counts": {
+          "packed_aspy": 70
+        },
+        "wall_sec": 4.941561184823513
+      },
+      "position": 2,
+      "process_elapsed_sec": 24.323630197905004,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.8172177076339722,
+        "forwards": 14,
+        "native_lif_calls": 84,
+        "route_counts": {
+          "packed_aspy": 14
+        },
+        "wall_sec": 15.505099857226014
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_eager",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 1,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle1_pos0_packed_eager.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.4887784421443939,
+        "final_state_sha256": "4a0c8d394055440d0f0ebe909e28d9c7e48801d4d37a235e63ccad7a32240053",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0061242580413818,
+          "parameter_abs_sum": 66130.80055702123,
+          "parameter_l2": 97.16137351113991
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 70
+        },
+        "wall_sec": 5.122218692675233
+      },
+      "position": 0,
+      "process_elapsed_sec": 23.765918968245387,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.6089953184127808,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 14
+        },
+        "wall_sec": 14.747030572034419
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_aspy",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 1,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle1_pos1_packed_aspy.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.5166580080986023,
+        "final_state_sha256": "ab58fcd233ea396a95b7f74cd01efca41707a4342d9a6f6ed9a0e76c9f8757f0",
+        "final_state_summary": {
+          "parameter_abs_max": 1.005228042602539,
+          "parameter_abs_sum": 66131.46913613263,
+          "parameter_l2": 97.16266061605931
+        },
+        "forwards": 70,
+        "native_lif_calls": 420,
+        "route_counts": {
+          "packed_aspy": 70
+        },
+        "wall_sec": 4.002178872935474
+      },
+      "position": 1,
+      "process_elapsed_sec": 23.853897931985557,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.8218106031417847,
+        "forwards": 14,
+        "native_lif_calls": 84,
+        "route_counts": {
+          "packed_aspy": 14
+        },
+        "wall_sec": 16.044579522684216
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "legacy_stepwise",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 1,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle1_pos2_legacy_stepwise.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.36316177248954773,
+        "final_state_sha256": "8f1105352da376b7284e7756f598565c53d308833462d7692e0914d63f1501fc",
+        "final_state_summary": {
+          "parameter_abs_max": 1.005634069442749,
+          "parameter_abs_sum": 66122.76624020207,
+          "parameter_l2": 97.16173017986888
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 70
+        },
+        "wall_sec": 5.321423910558224
+      },
+      "position": 2,
+      "process_elapsed_sec": 24.707107921130955,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.4951066970825195,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 14
+        },
+        "wall_sec": 15.396012833341956
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_aspy",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 2,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle2_pos0_packed_aspy.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.46088677644729614,
+        "final_state_sha256": "237008c3fb810f2c2098db92e3686d0467f1a9495dc4de5f91ec713f38caf31b",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0041015148162842,
+          "parameter_abs_sum": 66129.80737296201,
+          "parameter_l2": 97.16226464315659
+        },
+        "forwards": 70,
+        "native_lif_calls": 420,
+        "route_counts": {
+          "packed_aspy": 70
+        },
+        "wall_sec": 4.388177410699427
+      },
+      "position": 0,
+      "process_elapsed_sec": 24.698629898019135,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.856532335281372,
+        "forwards": 14,
+        "native_lif_calls": 84,
+        "route_counts": {
+          "packed_aspy": 14
+        },
+        "wall_sec": 16.341160863637924
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "legacy_stepwise",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 2,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle2_pos1_legacy_stepwise.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.4921680986881256,
+        "final_state_sha256": "050c4a977c6dbeb1857f2a9f0287ac790230d0ec7314610a5dc529b24796a7c3",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0061308145523071,
+          "parameter_abs_sum": 66128.69041069399,
+          "parameter_l2": 97.16182826159191
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 70
+        },
+        "wall_sec": 5.568341184407473
+      },
+      "position": 1,
+      "process_elapsed_sec": 24.231006336398423,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.6320470571517944,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 14
+        },
+        "wall_sec": 14.838190650567412
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_eager",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 2,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle2_pos2_packed_eager.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.49242982268333435,
+        "final_state_sha256": "092dbda413e432d17324933b9c3d0b12ccd76def10f1f2501a307944812e49d1",
+        "final_state_summary": {
+          "parameter_abs_max": 1.006793737411499,
+          "parameter_abs_sum": 66134.97879615932,
+          "parameter_l2": 97.16330207838746
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 70
+        },
+        "wall_sec": 5.008698103949428
+      },
+      "position": 2,
+      "process_elapsed_sec": 24.08881370909512,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.6065255403518677,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 14
+        },
+        "wall_sec": 15.209431620314717
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "legacy_stepwise",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 3,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle3_pos0_legacy_stepwise.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.4051404595375061,
+        "final_state_sha256": "c8d8951fa7d3c37b1965c2d5506266571f27e1144f4440240a30f2c49d672f4a",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0046775341033936,
+          "parameter_abs_sum": 66118.07387133886,
+          "parameter_l2": 97.15961044473057
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 70
+        },
+        "wall_sec": 5.392576699145138
+      },
+      "position": 0,
+      "process_elapsed_sec": 23.558821314945817,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.535846471786499,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 14
+        },
+        "wall_sec": 14.495910286903381
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_aspy",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 3,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle3_pos1_packed_aspy.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.5455633997917175,
+        "final_state_sha256": "1a542342682380a97d014f7002dea3ecc672778aee45675ced8e79423366d287",
+        "final_state_summary": {
+          "parameter_abs_max": 1.003677487373352,
+          "parameter_abs_sum": 66127.08636436006,
+          "parameter_l2": 97.16157036333918
+        },
+        "forwards": 70,
+        "native_lif_calls": 420,
+        "route_counts": {
+          "packed_aspy": 70
+        },
+        "wall_sec": 4.377197484485805
+      },
+      "position": 1,
+      "process_elapsed_sec": 24.048393154516816,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.5647244453430176,
+        "forwards": 14,
+        "native_lif_calls": 84,
+        "route_counts": {
+          "packed_aspy": 14
+        },
+        "wall_sec": 15.899185503832996
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_eager",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 3,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle3_pos2_packed_eager.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.6661839485168457,
+        "final_state_sha256": "87d96b5ecbedcd7d84acac0832206d057834360886970caa57f02b76ef5336a8",
+        "final_state_summary": {
+          "parameter_abs_max": 1.006520390510559,
+          "parameter_abs_sum": 66129.58639820572,
+          "parameter_l2": 97.16108483215109
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 70
+        },
+        "wall_sec": 4.9833536660298705
+      },
+      "position": 2,
+      "process_elapsed_sec": 23.270305562764406,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 2.028106451034546,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 14
+        },
+        "wall_sec": 14.66610778030008
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_aspy",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 4,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle4_pos0_packed_aspy.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.39676937460899353,
+        "final_state_sha256": "e1c38006bd279d28dd32f916b55d86d9735d2ea14a3faeb67655166c72f251fb",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0047271251678467,
+          "parameter_abs_sum": 66135.94110902853,
+          "parameter_l2": 97.16275104109464
+        },
+        "forwards": 70,
+        "native_lif_calls": 420,
+        "route_counts": {
+          "packed_aspy": 70
+        },
+        "wall_sec": 4.4097282551229
+      },
+      "position": 0,
+      "process_elapsed_sec": 23.931215613149107,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.6151299476623535,
+        "forwards": 14,
+        "native_lif_calls": 84,
+        "route_counts": {
+          "packed_aspy": 14
+        },
+        "wall_sec": 15.669299626722932
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "packed_eager",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 4,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle4_pos1_packed_eager.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.458217978477478,
+        "final_state_sha256": "e31c68d58ee46b158bd0dbcf7a59c670f86adb791a6214e55def0891ad94ec1b",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0044232606887817,
+          "parameter_abs_sum": 66129.70937247132,
+          "parameter_l2": 97.16093144902017
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 70
+        },
+        "wall_sec": 5.415228976868093
+      },
+      "position": 1,
+      "process_elapsed_sec": 23.832184131257236,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.6328933238983154,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "packed_eager": 14
+        },
+        "wall_sec": 14.690240321680903
+      },
+      "warmup_epochs": 1
+    },
+    {
+      "backend": "legacy_stepwise",
+      "batch_size": 128,
+      "client_id": 0,
+      "config": "configs/smoke/spikingjelly_npu_packed_aspy_seed2.yaml",
+      "config_sha256": "12c7dcab52b7ba68ff20986c259fc50e5f75bb55f5a678ab47cc0e0bc6ce2395",
+      "cycle": 4,
+      "device": "qualified Ascend 910B4 device",
+      "device_name": "Ascend910B4-1",
+      "file": "cycle4_pos2_legacy_stepwise.json",
+      "full_batches_per_epoch": 13,
+      "initial_state_sha256": "824e787dbb1bea35fd1563c3fc44c570768e52f0a62127c4f89120511ca30608",
+      "learning_rate": 0.05,
+      "local_epochs": 5,
+      "measurement": {
+        "batch_size_counts": {
+          "128": 65,
+          "42": 5
+        },
+        "final_loss": 0.5047133564949036,
+        "final_state_sha256": "b76152956eafbdd4d45ebd6ade0c653cb4d0835e076bd17c093f37297c008831",
+        "final_state_summary": {
+          "parameter_abs_max": 1.0051416158676147,
+          "parameter_abs_sum": 66126.2337447427,
+          "parameter_l2": 97.1616961414207
+        },
+        "forwards": 70,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 70
+        },
+        "wall_sec": 5.151015340350568
+      },
+      "position": 2,
+      "process_elapsed_sec": 25.106858777813613,
+      "python": "3.10.20",
+      "remainder": 42,
+      "samples": 1706,
+      "seed": 20260729,
+      "status": "PASS",
+      "synchronization": "one NPU synchronize immediately before and after each complete client run",
+      "timesteps": 4,
+      "torch": "2.9.0+cpu",
+      "torch_npu": "2.9.0",
+      "warmup": {
+        "batch_size_counts": {
+          "128": 13,
+          "42": 1
+        },
+        "final_loss": 1.3469964265823364,
+        "forwards": 14,
+        "native_lif_calls": 0,
+        "route_counts": {
+          "legacy_stepwise": 14
+        },
+        "wall_sec": 15.609902483411133
+      },
+      "warmup_epochs": 1
+    }
+  ],
+  "status": "PASS",
+  "summary": {
+    "legacy_stepwise": {
+      "mean_sec": 5.343101895414293,
+      "median_sec": 5.321423910558224,
+      "samples_sec": [
+        5.282152342610061,
+        5.321423910558224,
+        5.568341184407473,
+        5.392576699145138,
+        5.151015340350568
+      ]
+    },
+    "packed_aspy": {
+      "mean_sec": 4.423768641613424,
+      "median_sec": 4.388177410699427,
+      "samples_sec": [
+        4.941561184823513,
+        4.002178872935474,
+        4.388177410699427,
+        4.377197484485805,
+        4.4097282551229
+      ]
+    },
+    "packed_eager": {
+      "mean_sec": 5.079013594985009,
+      "median_sec": 5.008698103949428,
+      "samples_sec": [
+        4.865568535402417,
+        5.122218692675233,
+        5.008698103949428,
+        4.9833536660298705,
+        5.415228976868093
+      ]
+    }
+  }
+}

@@ -128,7 +128,7 @@ class MemoryModule(nn.Module, StepModule):
                     # next independent sequence. A fresh tensor is the safe choice.
                     if isinstance(reset_value, torch.Tensor):
                         current = reset_value.detach().clone()
-                    elif isinstance(reset_value, (int, float, bool)):
+                    elif isinstance(reset_value, int | float | bool):
                         current = torch.full_like(current, reset_value, requires_grad=False)
                     else:
                         current = copy.deepcopy(reset_value)
@@ -141,7 +141,7 @@ class MemoryModule(nn.Module, StepModule):
                         current.copy_(reset_value)
                     else:
                         current = reset_value.detach().clone()
-                elif isinstance(reset_value, (int, float, bool)):
+                elif isinstance(reset_value, int | float | bool):
                     # Eval/no-grad state can be restored in place, retaining stable
                     # addresses for fixed-shape graph replay.
                     current.fill_(reset_value)

@@ -9,9 +9,12 @@ def test_import_does_not_import_torch_npu():
         "from spikingjelly_npu.activation_based import neuron; "
         "node = neuron.IFNode(backend='aspy', step_mode='m'); "
         "plif = neuron.ParametricLIFNode(backend='aspy', step_mode='m'); "
+        "decay = spikingjelly_npu.fedsnn.DecayLIF(0.5, backend='aspy'); "
         "node(torch.ones(2, 1, 1)); plif(torch.ones(2, 1, 1)); "
+        "decay(torch.ones(2, 1, 1)); "
         "assert node.last_backend_route.backend == 'torch'; "
         "assert plif.last_backend_route.backend == 'torch'; "
+        "assert decay.last_backend_route.backend == 'torch'; "
         "assert 'torch_npu' not in sys.modules; print('ok')"
     )
     env = os.environ.copy()

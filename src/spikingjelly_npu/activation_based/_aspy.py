@@ -8,6 +8,7 @@ configuration checks have passed.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 from dataclasses import dataclass
 from types import ModuleType
@@ -65,6 +66,15 @@ class _AsPyPLIFRequest(_AsPyIFRequest):
     decay_input: bool
 
 
+@dataclass(frozen=True)
+class _AsPyFedSNNDecayLIFRequest:
+    current_seq: torch.Tensor
+    membrane_decay: float
+    v_threshold: float
+    surrogate_name: str
+    surrogate_alpha: float
+
+
 _EXTENSION_ENV = "SPIKINGJELLY_NPU_ASPY_EXTENSION"
 _DEFAULT_EXTENSION = "spikingjelly_npu_aspy"
 
@@ -109,11 +119,92 @@ def _unsupported_reason(
             "AsPy initial voltage shape must equal one time-step shape; "
             f"got v={tuple(v_init.shape)} and step={tuple(x_seq.shape[1:])}"
         )
+    for name, tensor in (("input", x_seq), ("initial voltage", v_init)):
+        format_reason = _require_npu_nd(tensor)
+        if format_reason is not None:
+            return f"AsPy {name} is not bridge-safe: {format_reason}"
     if not isinstance(surrogate_function, surrogate.ATan):
         return "AsPy currently supports only the ATan surrogate"
     if not surrogate_function.spiking:
         return "AsPy requires the surrogate to be in spiking mode"
     return None
+
+
+def _unsupported_stateless_reason(
+    current_seq: torch.Tensor,
+    surrogate_function: surrogate.SurrogateFunctionBase,
+) -> str | None:
+    if current_seq.device.type != "npu":
+        return f"AsPy requires an NPU tensor, got device={current_seq.device.type}"
+    if current_seq.dtype != torch.float32:
+        return f"AsPy currently requires torch.float32, got dtype={current_seq.dtype}"
+    if current_seq.shape[0] == 0:
+        return "AsPy requires at least one time step"
+    if current_seq[0].numel() == 0:
+        return "AsPy requires at least one neuron per time step"
+    if not current_seq.is_contiguous() or current_seq.storage_offset() != 0:
+        return "AsPy currently requires contiguous input with storage offset zero"
+    if not isinstance(surrogate_function, surrogate.ATan):
+        return "AsPy currently supports only the ATan surrogate"
+    if not surrogate_function.spiking:
+        return "AsPy requires the surrogate to be in spiking mode"
+    return None
+
+
+def _npu_format_value(tensor: torch.Tensor) -> tuple[int | None, str | None]:
+    """Inspect physical Ascend storage without importing torch-npu at package load."""
+
+    if tensor.device.type != "npu":
+        return None, None
+    try:
+        torch_npu = importlib.import_module("torch_npu")
+    except (ImportError, OSError) as error:
+        return None, f"torch_npu format inspection is unavailable: {error}"
+    get_format = getattr(torch_npu, "get_npu_format", None)
+    if not callable(get_format):
+        get_format = getattr(getattr(torch.ops, "npu", None), "get_npu_format", None)
+    if not callable(get_format):
+        return None, "torch_npu does not expose get_npu_format"
+    try:
+        return int(get_format(tensor)), None
+    except (RuntimeError, TypeError, ValueError) as error:
+        return None, f"could not inspect NPU storage format: {error}"
+
+
+def _require_npu_nd(tensor: torch.Tensor) -> str | None:
+    """Reject non-ND Ascend storage before the ND-only native bridge loads."""
+
+    source_value, error = _npu_format_value(tensor)
+    if error is not None:
+        return error
+    if source_value is not None and source_value != 2:
+        return (
+            "AsPy native bridge requires physical ACL_FORMAT_ND (2), "
+            f"got format={source_value}"
+        )
+    return None
+
+
+def _require_fedsnn_base_format(tensor: torch.Tensor) -> str | None:
+    """Allow only formats that the FedSNN adapter can copy safely to native ND.
+
+    Real packed convolutional BNTT produces rank-5 ``ACL_FORMAT_NCDHW`` (30).
+    The adapter flattens and copies that documented base format to a fresh ND
+    tensor before the native bridge. Internal formats remain pre-load rejects.
+    """
+
+    source_value, error = _npu_format_value(tensor)
+    if error is not None:
+        return error
+    if source_value is None or source_value == 2:
+        return None
+    if tensor.ndim == 5 and source_value == 30:
+        return None
+    return (
+        "AsPy FedSNN decay-LIF requires physical ACL_FORMAT_ND (2) or "
+        "rank-5 ACL_FORMAT_NCDHW (30), "
+        f"got format={source_value}"
+    )
 
 
 def _load_extension() -> tuple[ModuleType | None, str | None]:
@@ -332,6 +423,10 @@ def try_plif_multi_step(
             "AsPy PLIF reciprocal_tau must be a contiguous FP32 scalar tensor "
             "on the input NPU with storage offset zero"
         )
+    if reason is None:
+        format_reason = _require_npu_nd(reciprocal_tau)
+        if format_reason is not None:
+            reason = f"AsPy PLIF reciprocal_tau is not bridge-safe: {format_reason}"
     if reason is not None:
         if strict:
             raise AsPyBackendError(reason)
@@ -378,6 +473,83 @@ def try_plif_multi_step(
     result = _normalize_result(raw_result, store_v_seq)
     _validate_result(result, request)
     return result, native_route("PLIF")
+
+
+def try_fedsnn_decay_lif(
+    current_seq: torch.Tensor,
+    *,
+    membrane_decay: float,
+    v_threshold: float,
+    surrogate_function: surrogate.SurrogateFunctionBase,
+    strict: bool,
+) -> tuple[torch.Tensor | None, AsPyRoute]:
+    """Run the exact stateless FedSNN decay-LIF scan when qualified."""
+
+    reason = _unsupported_stateless_reason(current_seq, surrogate_function)
+    if reason is None and (
+        not isinstance(membrane_decay, float)
+        or not 0.0 <= membrane_decay <= 1.0
+    ):
+        reason = "AsPy FedSNN decay-LIF requires float membrane_decay in [0, 1]"
+    if reason is None and not math.isfinite(v_threshold):
+        reason = "AsPy FedSNN decay-LIF requires a finite v_threshold"
+    if reason is None and (
+        not math.isfinite(surrogate_function.alpha)
+        or surrogate_function.alpha <= 0.0
+    ):
+        reason = "AsPy FedSNN decay-LIF requires finite positive ATan alpha"
+    if reason is not None:
+        if strict:
+            raise AsPyBackendError(reason)
+        return None, eager_route("aspy", reason)
+
+    format_error = _require_fedsnn_base_format(current_seq)
+    if format_error is not None:
+        if strict:
+            raise AsPyBackendError(format_error)
+        return None, eager_route("aspy", format_error)
+
+    extension, load_error = _load_extension()
+    if extension is None:
+        assert load_error is not None
+        if strict:
+            raise AsPyBackendError(load_error)
+        return None, eager_route("aspy", load_error)
+
+    implementation = getattr(extension, "fedsnn_decay_lif", None)
+    supports_feature = getattr(extension, "supports_fedsnn_decay_lif", None)
+    if not callable(implementation) or supports_feature is not True:
+        reason = "AsPy extension does not provide FedSNN decay-LIF support"
+        if strict:
+            raise AsPyBackendError(reason)
+        return None, eager_route("aspy", reason)
+
+    request = _AsPyFedSNNDecayLIFRequest(
+        current_seq=current_seq,
+        membrane_decay=membrane_decay,
+        v_threshold=v_threshold,
+        surrogate_name="atan",
+        surrogate_alpha=float(surrogate_function.alpha),
+    )
+    spike_seq = implementation(
+        request.current_seq,
+        request.membrane_decay,
+        request.v_threshold,
+        request.surrogate_name,
+        request.surrogate_alpha,
+    )
+    if not isinstance(spike_seq, torch.Tensor):
+        raise TypeError("AsPy FedSNN decay-LIF result must be a tensor")
+    if spike_seq.shape != current_seq.shape:
+        raise ValueError(
+            "AsPy FedSNN decay-LIF spike_seq shape mismatch: "
+            f"expected {tuple(current_seq.shape)}, got {tuple(spike_seq.shape)}"
+        )
+    if spike_seq.device != current_seq.device or spike_seq.dtype != current_seq.dtype:
+        raise ValueError(
+            "AsPy FedSNN decay-LIF spike_seq must match input device and dtype"
+        )
+    return spike_seq, native_route("FedSNN decay-LIF")
 
 
 __all__ = ["AsPyBackendError", "AsPyIFResult", "AsPyRoute"]

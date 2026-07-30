@@ -1,0 +1,84 @@
+{
+  "packed_aspy": {
+    "client_sec": 0.8355607474222779,
+    "last_lif_route": "AsPyRoute(requested_backend='aspy', backend='aspy', reason='Ascend C fused multi-step FedSNN decay-LIF kernel', accelerated=True)",
+    "last_runner_route": "packed_aspy",
+    "profiles": [
+      {
+        "batch_size": 128,
+        "stages": {
+          "backward": 21.737159729003906,
+          "bntt": 7.6776198744773865,
+          "forward_encoded_total": 20.88641929626465,
+          "loss": 0.420879989862442,
+          "membrane_recurrence": 4.760019958019257,
+          "optimizer": 0.11807999759912491,
+          "packed_ann": 6.309320047497749,
+          "packed_ann_plus_bntt": 13.986939921975136,
+          "poisson": 0.7836599946022034,
+          "readout": 0.28812000155448914
+        },
+        "sync_wait_ms": 12.019640766084194,
+        "wall_ms": 45.55670917034149
+      },
+      {
+        "batch_size": 128,
+        "stages": {
+          "backward": 21.676359176635742,
+          "bntt": 7.612460017204285,
+          "forward_encoded_total": 20.62388038635254,
+          "loss": 0.29627999663352966,
+          "membrane_recurrence": 4.687179982662201,
+          "optimizer": 0.1152999997138977,
+          "packed_ann": 6.076300002634525,
+          "packed_ann_plus_bntt": 13.68876001983881,
+          "poisson": 0.7431600093841553,
+          "readout": 0.26006001234054565
+        },
+        "sync_wait_ms": 12.169331312179565,
+        "wall_ms": 44.035494327545166
+      }
+    ]
+  },
+  "packed_eager": {
+    "client_sec": 1.0682773804292083,
+    "last_lif_route": "torch_stepwise",
+    "last_runner_route": "packed_eager",
+    "profiles": [
+      {
+        "batch_size": 128,
+        "stages": {
+          "backward": 28.88089942932129,
+          "bntt": 7.502639830112457,
+          "forward_encoded_total": 26.072940826416016,
+          "loss": 0.3423599898815155,
+          "membrane_recurrence": 10.165259957313538,
+          "optimizer": 0.11698000133037567,
+          "packed_ann": 6.269920010119677,
+          "packed_ann_plus_bntt": 13.772559840232134,
+          "poisson": 0.8312199711799622,
+          "readout": 0.28088000416755676
+        },
+        "sync_wait_ms": 11.537009850144386,
+        "wall_ms": 57.85378161817789
+      },
+      {
+        "batch_size": 128,
+        "stages": {
+          "backward": 28.601720809936523,
+          "bntt": 7.48824006319046,
+          "forward_encoded_total": 25.98617935180664,
+          "loss": 0.304500013589859,
+          "membrane_recurrence": 10.267759919166565,
+          "optimizer": 0.11674000322818756,
+          "packed_ann": 6.131940007209778,
+          "packed_ann_plus_bntt": 13.620180070400238,
+          "poisson": 0.7192599773406982,
+          "readout": 0.2847200036048889
+        },
+        "sync_wait_ms": 9.730806574225426,
+        "wall_ms": 56.36924784630537
+      }
+    ]
+  }
+}

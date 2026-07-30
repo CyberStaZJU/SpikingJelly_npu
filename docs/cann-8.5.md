@@ -24,7 +24,7 @@ The package does not explicitly import `torch_npu` until a runtime helper is cal
 
 ## Release installation and optional source build
 
-The release installer downloads the pure-Python wheel and, on the exact qualified ABI, a relocatable native bundle containing `_spikingjelly_npu_aspy` and `libcust_opapi.so`:
+The release installer downloads the pure-Python wheel and, on the exact qualified hardware/runtime matrix, that release's relocatable native bundle containing `_spikingjelly_npu_aspy` and `libcust_opapi.so`. `--check` validates Linux aarch64, CPython 3.10, torch/torch-npu 2.9, a sourced CANN 8.5 toolkit, and an Ascend 910B device without installing. `--require-native` also probes the extracted extension and fails before installation when the FedSNN decay-LIF symbols are absent. Ordinary auto mode emits an explicit warning when the bundle supports only generic routes and cannot provide `packed_aspy`. The bundle attached to `v0.1.0-alpha.1` predates those symbols; use the source build below for `packed_aspy` until a newer release explicitly advertises support:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/CyberStaZJU/SpikingJelly_npu/main/install.sh | bash -s -- --require-native
@@ -43,7 +43,7 @@ source "$SPIKINGJELLY_NPU_ASPY_BUILD_ROOT/activate_aspy.sh"
 ASCEND_DEVICE_ID=7 scripts/run_aspy_tests.sh
 ```
 
-`build_aspy.sh` generates and builds independent ACLNN forward/backward operators for IF, fixed-tau LIF, and dynamic-parameter PLIF, targeting `ascend910b`, then builds `_spikingjelly_npu_aspy` with `NpuExtension`. The bridge submits each operator to the current NPU stream through torch-npu `OpCommand::RunOpApiV2`. It retains workspace, ACL tensors, and executor ownership in the task-queue callback and has no explicit hot-path stream/device synchronization. PLIF passes reciprocal tau as a one-element FP32 NPU tensor, not a frozen host attribute.
+`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent ACLNN forward/backward operators for IF, fixed-tau LIF, dynamic-parameter PLIF, and the exact stateless FedSNN decay-LIF, targeting `ascend910b`, then builds `_spikingjelly_npu_aspy` with `NpuExtension`. Use `PYTHON=/path/to/python3.10` to select the interpreter. Before success it imports the extension and requires all eight forward/backward symbols. External `build-manifest.json` records those capabilities, tool/runtime identity, and a deterministic source-input digest over each included file's path, byte size, and SHA-256. Under Git, the scope is tracked plus untracked non-ignored files; filtered snapshots use the corresponding source-file scope. The bridge submits each operator to the current NPU stream through torch-npu `OpCommand::RunOpApiV2`. It retains workspace, ACL tensors, and executor ownership in the task-queue callback and has no explicit hot-path stream/device synchronization. PLIF passes reciprocal tau as a one-element FP32 NPU tensor, not a frozen host attribute.
 
 The native API is consumed through the public package classes, not by importing `_spikingjelly_npu_aspy` directly:
 
@@ -78,7 +78,7 @@ assert plif_node.last_backend_route.backend == "aspy"
 assert x.grad is not None and plif_node.w.grad is not None
 ```
 
-Qualified native scope: FP32, non-empty time-major multi-step IF/LIF/PLIF; contiguous storage-offset-zero inputs/state; spiking ATan surrogate; hard or soft reset; both `detach_reset` values; both LIF/PLIF `decay_input` values; first-order input/carried-state gradients; and PLIF `w.grad`. LIF requires fixed float `tau > 1`. Unsupported or unavailable requests pre-fallback to PyTorch unless `backend_strict=True`; native failures after launch are not hidden by replaying a stateful eager step.
+Qualified native scope: FP32 rank-two-or-higher time-major multi-step IF/LIF/PLIF with non-empty time and flattened-timestep dimensions; contiguous storage-offset-zero inputs/state; spiking ATan surrogate; hard or soft reset; both `detach_reset` values; both LIF/PLIF `decay_input` values; first-order input/carried-state gradients; and PLIF `w.grad`. LIF requires fixed float `tau > 1`. Unsupported or unavailable requests pre-fallback to PyTorch unless `backend_strict=True`; native failures after launch are not hidden by replaying a stateful eager step.
 
 ## Device configuration
 

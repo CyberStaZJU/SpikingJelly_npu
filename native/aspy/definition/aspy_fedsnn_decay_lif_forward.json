@@ -1,0 +1,81 @@
+[
+  {
+    "op": "AsPyFedSNNDecayLifForward",
+    "input_desc": [
+      {
+        "name": "currentSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "spikeSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "hSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "attr": [
+      {
+        "name": "membraneDecay",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "vThreshold",
+        "param_type": "required",
+        "type": "float"
+      }
+    ]
+  },
+  {
+    "op": "AsPyFedSNNDecayLifBackward",
+    "input_desc": [
+      {
+        "name": "hSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      },
+      {
+        "name": "gradSpikeSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "gradCurrentSeq",
+        "param_type": "required",
+        "format": ["ND"],
+        "type": ["fp32"]
+      }
+    ],
+    "attr": [
+      {
+        "name": "membraneDecay",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "vThreshold",
+        "param_type": "required",
+        "type": "float"
+      },
+      {
+        "name": "surrogateAlpha",
+        "param_type": "required",
+        "type": "float"
+      }
+    ]
+  }
+]

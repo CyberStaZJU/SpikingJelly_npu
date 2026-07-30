@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from spikingjelly_npu.activation_based import functional, neuron, surrogate
+from spikingjelly_npu.fedsnn import DecayLIF
 from spikingjelly_npu.npu import StaticGraphRunner, configure_npu, is_npu_available
 
 pytestmark = [pytest.mark.npu, pytest.mark.aspy]
@@ -16,6 +17,343 @@ def require_native_aspy():
         pytest.skip("Ascend NPU unavailable")
     index = int(os.environ.get("ASCEND_DEVICE_ID", "0"))
     return configure_npu(f"npu:{index}")
+
+
+def npu_format(tensor: torch.Tensor) -> int:
+    torch_npu = pytest.importorskip("torch_npu")
+    get_format = getattr(torch_npu, "get_npu_format", None)
+    if not callable(get_format):
+        get_format = torch.ops.npu.get_npu_format
+    return int(get_format(tensor))
+
+
+def make_fractal_nz(tensor: torch.Tensor) -> torch.Tensor:
+    """Construct a physical format-29 tensor without changing test policy."""
+
+    torch_npu = pytest.importorskip("torch_npu")
+    torch.npu.config.allow_internal_format = True
+    try:
+        internal = torch_npu.npu_format_cast(
+            tensor, int(torch_npu.Format.FRACTAL_NZ)
+        )
+        torch.npu.synchronize(tensor.device)
+    finally:
+        torch.npu.config.allow_internal_format = False
+    assert int(torch.ops.npu.get_npu_format(internal)) == int(
+        torch_npu.Format.FRACTAL_NZ
+    )
+    return internal
+
+
+@pytest.mark.parametrize("shape", [(4, 2, 5), (3, 1, 4097)])
+def test_aspy_fedsnn_decay_lif_exact_forward_backward(shape):
+    device = require_native_aspy()
+    torch.manual_seed(20260901)
+    current_reference = torch.rand(
+        shape, dtype=torch.float32, device=device, requires_grad=True
+    )
+    current_accelerated = current_reference.detach().clone().requires_grad_(True)
+    kwargs = {
+        "membrane_decay": 0.75,
+        "v_threshold": 0.7,
+        "surrogate_function": surrogate.ATan(alpha=2.5),
+    }
+    reference = DecayLIF(backend="torch", **kwargs).to(device)
+    accelerated = DecayLIF(
+        backend="aspy", backend_strict=True, **kwargs
+    ).to(device)
+
+    expected = reference(current_reference)
+    actual = accelerated(current_accelerated)
+    weight = torch.linspace(
+        0.25, 1.25, expected.numel(), dtype=expected.dtype, device=device
+    ).reshape_as(expected)
+    (expected * weight).sum().backward()
+    (actual * weight).sum().backward()
+    torch.npu.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        current_accelerated.grad,
+        current_reference.grad,
+        rtol=5e-5,
+        atol=3e-5,
+    )
+    assert accelerated.last_backend_route.backend == "aspy"
+    assert accelerated.last_backend_route.accelerated
+    assert accelerated.state_dict() == {}
+
+
+def test_aspy_fedsnn_decay_lif_real_ncdhw_copy_preserves_forward_and_gradient(
+    monkeypatch,
+):
+    device = require_native_aspy()
+    torch_npu = pytest.importorskip("torch_npu")
+    import spikingjelly_npu_aspy as adapter
+
+    torch.manual_seed(20260905)
+    time_steps = 4
+    batch_size = 2
+    channels = 8
+    encoded = torch.rand(
+        time_steps,
+        batch_size,
+        3,
+        8,
+        8,
+        dtype=torch.float32,
+        device=device,
+    )
+    convolution = torch.nn.Conv2d(3, channels, 3, padding=1, bias=False).to(device)
+    bntt = torch.nn.ModuleList(
+        torch.nn.BatchNorm2d(channels).to(device).eval() for _ in range(time_steps)
+    )
+    packed = convolution(encoded.flatten(0, 1)).reshape(
+        time_steps,
+        batch_size,
+        channels,
+        8,
+        8,
+    )
+    ncdhw = torch.stack([bntt[step](packed[step]) for step in range(time_steps)])
+    torch.npu.synchronize(device)
+    ncdhw_format = int(getattr(torch_npu.Format, "NCDHW", 30))
+    assert npu_format(ncdhw) == ncdhw_format, (
+        "the qualified packed Conv/BNTT producer must materialize physical "
+        f"ACL_FORMAT_NCDHW ({ncdhw_format})"
+    )
+    ncdhw.retain_grad()
+    reference_current = ncdhw.detach().clone().requires_grad_(True)
+    native_formats = []
+    original_require_nd = adapter._require_nd
+
+    def record_require_nd(tensor, name):
+        if name == "current_seq":
+            native_formats.append(npu_format(tensor))
+        return original_require_nd(tensor, name)
+
+    monkeypatch.setattr(adapter, "_require_nd", record_require_nd)
+    kwargs = {
+        "membrane_decay": 0.75,
+        "v_threshold": 0.7,
+        "surrogate_function": surrogate.ATan(alpha=2.5),
+    }
+    expected = DecayLIF(backend="torch", **kwargs).to(device)(reference_current)
+    accelerated = DecayLIF(
+        backend="aspy", backend_strict=True, **kwargs
+    ).to(device)
+    actual = accelerated(ncdhw)
+    weight = torch.linspace(
+        0.25, 1.25, actual.numel(), dtype=actual.dtype, device=device
+    ).reshape_as(actual)
+    (expected * weight).sum().backward()
+    (actual * weight).sum().backward()
+    torch.npu.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        ncdhw.grad,
+        reference_current.grad,
+        rtol=5e-5,
+        atol=3e-5,
+    )
+    assert convolution.weight.grad is not None
+    assert native_formats and all(value == 2 for value in native_formats)
+    assert accelerated.last_backend_route.backend == "aspy"
+
+
+def test_aspy_fedsnn_decay_lif_internal_format_falls_back_before_native(
+    monkeypatch,
+):
+    device = require_native_aspy()
+    import spikingjelly_npu.activation_based._aspy as aspy_router
+
+    current = torch.rand(4, 64, dtype=torch.float32, device=device)
+    internal = make_fractal_nz(current)
+    assert internal.is_contiguous()
+    assert internal.storage_offset() == 0
+    load_calls = []
+    monkeypatch.setattr(
+        aspy_router,
+        "_load_extension",
+        lambda: load_calls.append(True) or (None, "must not load"),
+    )
+    module = DecayLIF(
+        membrane_decay=0.75,
+        v_threshold=0.7,
+        surrogate_function=surrogate.ATan(alpha=2.5),
+        backend="aspy",
+    ).to(device)
+
+    actual = module(internal)
+    expected = module._torch_forward(internal)
+    torch.npu.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert load_calls == []
+    assert module.last_backend_route.backend == "torch"
+    assert "ACL_FORMAT_ND (2)" in module.last_backend_route.reason
+    assert "ACL_FORMAT_NCDHW (30)" in module.last_backend_route.reason
+    assert "format=29" in module.last_backend_route.reason
+
+    strict = DecayLIF(
+        membrane_decay=0.75,
+        v_threshold=0.7,
+        surrogate_function=surrogate.ATan(alpha=2.5),
+        backend="aspy",
+        backend_strict=True,
+    ).to(device)
+    with pytest.raises(RuntimeError, match="ACL_FORMAT_ND"):
+        strict(internal)
+    assert load_calls == []
+
+
+def test_aspy_native_bridge_directly_rejects_internal_format():
+    device = require_native_aspy()
+    from spikingjelly_npu._native import load_aspy_native
+
+    current = torch.rand(4, 64, dtype=torch.float32, device=device)
+    internal = make_fractal_nz(current)
+
+    with pytest.raises(RuntimeError, match="ACL_FORMAT_ND"):
+        load_aspy_native().fedsnn_decay_lif_forward(internal, 0.75, 0.7)
+
+
+@pytest.mark.parametrize(
+    ("call", "match"),
+    [
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                torch.rand(
+                    4,
+                    7,
+                    dtype=sequence.dtype,
+                    device=sequence.device,
+                ),
+                0.75,
+                0.7,
+            ),
+            "multiple of 8",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                sequence[0], 0.75, 0.7
+            ),
+            r"\[T, N",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                sequence[:0], 0.75, 0.7
+            ),
+            "time dimension must be non-empty",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                torch.empty(
+                    4,
+                    0,
+                    dtype=sequence.dtype,
+                    device=sequence.device,
+                ),
+                0.75,
+                0.7,
+            ),
+            "flattened time-step size must be non-empty",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                sequence, -0.1, 0.7
+            ),
+            "membrane_decay",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_forward(
+                sequence, 0.75, float("nan")
+            ),
+            "v_threshold",
+        ),
+        (
+            lambda native, sequence: native.fedsnn_decay_lif_backward(
+                sequence, sequence, 0.75, 0.7, 0.0
+            ),
+            "surrogate_alpha",
+        ),
+    ],
+)
+def test_aspy_native_bridge_direct_validation(call, match):
+    device = require_native_aspy()
+    from spikingjelly_npu._native import load_aspy_native
+
+    native = load_aspy_native()
+    sequence = torch.rand(4, 64, dtype=torch.float32, device=device)
+    with pytest.raises(RuntimeError, match=match):
+        call(native, sequence)
+
+
+def test_aspy_native_bridge_rejects_internal_format_for_all_generic_exports():
+    device = require_native_aspy()
+    from spikingjelly_npu._native import load_aspy_native
+
+    native = load_aspy_native()
+    sequence = torch.rand(4, 64, dtype=torch.float32, device=device)
+    voltage = torch.rand(64, dtype=torch.float32, device=device)
+    scalar = torch.tensor([0.4], dtype=torch.float32, device=device)
+    internal = make_fractal_nz(sequence)
+
+    forward_calls = [
+        lambda: native.if_forward(internal, voltage, 1.0, 0.0, True),
+        lambda: native.lif_forward(internal, voltage, 1.0, 0.0, True, 2.0, False),
+        lambda: native.plif_forward(
+            internal, voltage, scalar, 1.0, 0.0, True, False
+        ),
+    ]
+    backward_calls = [
+        lambda: native.if_backward(
+            sequence, sequence, internal, sequence, voltage,
+            1.0, 0.0, True, False, 2.0,
+        ),
+        lambda: native.lif_backward(
+            sequence, sequence, internal, sequence, voltage,
+            1.0, 0.0, True, False, 2.0, 2.0, False,
+        ),
+        lambda: native.plif_backward(
+            sequence, sequence, sequence, sequence, internal, sequence,
+            voltage, scalar, 1.0, 0.0, True, False, 2.0, False,
+        ),
+    ]
+    for call in (*forward_calls, *backward_calls):
+        with pytest.raises(RuntimeError, match="ACL_FORMAT_ND"):
+            call()
+
+
+def test_aspy_fedsnn_decay_lif_unsupported_npu_input_falls_back_before_native(
+    monkeypatch,
+):
+    device = require_native_aspy()
+    import spikingjelly_npu.activation_based._aspy as aspy_router
+
+    load_calls = []
+    monkeypatch.setattr(
+        aspy_router,
+        "_load_extension",
+        lambda: load_calls.append(True) or (None, "must not load"),
+    )
+    module = DecayLIF(
+        membrane_decay=0.75,
+        v_threshold=0.7,
+        surrogate_function=surrogate.ATan(alpha=2.5),
+        backend="aspy",
+    ).to(device)
+    current = torch.rand(4, 2, 5, dtype=torch.float16, device=device)
+
+    actual = module(current)
+    expected = module._torch_forward(current)
+    torch.npu.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert load_calls == []
+    assert module.last_backend_route.backend == "torch"
+    assert "requires torch.float32" in module.last_backend_route.reason
 
 
 @pytest.mark.parametrize("shape", [(3, 2, 4), (5, 3, 5), (4, 1, 4097), (4, 2, 4096)])

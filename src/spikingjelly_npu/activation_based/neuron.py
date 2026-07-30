@@ -60,7 +60,7 @@ class BaseNode(base.MemoryModule):
             self.register_memory("v_seq", None)
 
     def v_float_to_tensor(self, x: torch.Tensor) -> None:
-        if isinstance(self.v, (int, float)):
+        if isinstance(self.v, int | float):
             self.v = torch.full_like(x, float(self.v), requires_grad=False)
         elif isinstance(self.v, torch.Tensor):
             if self.v.shape != x.shape:

@@ -17,7 +17,7 @@ The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functiona
   - step-aware Linear, Conv1d/2d/3d, BatchNorm, pooling, flatten, and voting layers.
 - Correct hard/soft reset, `detach_reset`, `store_v_seq`, persistent state, and PLIF `w` state-dict semantics.
 - Packed stateless layers over `[T*N, ...]` and `StaticGraphRunner` fixed-full-batch NPUGraph with visible eager fallback.
-- Optional AsPy FP32 multi-step native routes for IF, fixed-tau LIF, and dynamic-parameter PLIF on Ascend 910B4/CANN 8.5.
+- Optional AsPy FP32 multi-step native routes for IF, fixed-tau LIF, dynamic-parameter PLIF, and an exact stateless FedSNN `membrane_decay * membrane + current` decay-LIF scan on Ascend 910B4/CANN 8.5.
 - AsPy first-order ATan-surrogate backward, input/carried-state gradients, and PLIF `w.grad`.
 - Real fixed-shape NPUGraph capture/replay for AsPy IF, LIF, and PLIF; PLIF reciprocal tau remains a dynamic device-tensor input during replay.
 - Observable AsPy fallback/strict decisions through `last_backend_route` and `AsPyBackendError`.
@@ -32,7 +32,9 @@ The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functiona
 curl -fsSL https://raw.githubusercontent.com/CyberStaZJU/SpikingJelly_npu/main/install.sh | bash
 ```
 
-The installer verifies SHA-256 hashes and installs the pure-Python wheel. On the exact qualified native matrix—Linux aarch64, CPython 3.10, torch 2.9.0, torch-npu 2.9.0, CANN 8.5 and Ascend 910B—it also installs the relocatable AsPy bundle. Use `--require-native` to reject a mismatched environment or `--fallback-only` to install only the eager-compatible wheel. It never uses `sudo` or changes the system CANN installation.
+The installer verifies SHA-256 hashes and installs the artifacts attached to the selected release. On the exact qualified native matrix—Linux aarch64, CPython 3.10, torch 2.9.0, torch-npu 2.9.0, CANN 8.5 and Ascend 910B—it can also install that release's relocatable AsPy bundle. `--check` reports the complete matrix without installing. Use `--require-native` to reject either a mismatched environment **or a bundle that lacks the FedSNN decay-LIF capability**; use `--fallback-only` to install only the eager-compatible wheel. In ordinary auto mode, a bundle without that capability is installed only for its generic IF/LIF/PLIF routes and produces an explicit warning that `packed_aspy` is unavailable. It never uses `sudo` or changes the system CANN installation.
+
+> **`packed_aspy` availability:** the existing `v0.1.0-alpha.1` release predates the FedSNN decay-LIF symbols. Until a newer release explicitly lists `packed_aspy` in its notes and native manifest, clone `main` and use the [source-build procedure](#optional-aspy-build) below. The installer probes the extracted extension before registration and prints its `fedsnn_decay_lif` capability; `--require-native` fails before package or bundle installation when that capability is absent.
 
 Ordinary import remains side-effect safe:
 
@@ -82,9 +84,9 @@ source "$SPIKINGJELLY_NPU_ASPY_BUILD_ROOT/activate_aspy.sh"
 ASCEND_DEVICE_ID=7 scripts/run_aspy_tests.sh
 ```
 
-`build_aspy.sh` generates and builds independent IF, fixed-tau LIF, and PLIF forward/backward ACLNN operators for `ascend910b`, then builds `_spikingjelly_npu_aspy` with torch-npu `NpuExtension`. The bridge submits on the current NPU stream through `at_npu::native::OpCommand::RunOpApiV2`, keeps workspace and ACL object owners alive in the task-queue callback, and has no explicit synchronization in the native forward/backward hot path.
+`build_aspy.sh` preflights the qualified Linux aarch64 / CPython 3.10 / torch and torch-npu 2.9 / CANN 8.5 matrix, generates and builds independent IF, fixed-tau LIF, PLIF, and exact FedSNN decay-LIF forward/backward ACLNN operators for `ascend910b`, then builds `_spikingjelly_npu_aspy` with torch-npu `NpuExtension`. Set `PYTHON=/path/to/python3.10` when the desired interpreter is not `python3`. Before reporting success, the script imports the built extension and requires all eight forward/backward symbols. The external `build-manifest.json` records that capability set, source Git identity/dirty state, and a deterministic SHA-256 over `path`, byte size, and file SHA-256 for every tracked plus untracked non-ignored build-input file (or the equivalent filtered snapshot scope outside Git), along with runtime versions, toolkit path, `msopgen`, CMake, compiler, and target SOC. The bridge submits on the current NPU stream through `at_npu::native::OpCommand::RunOpApiV2`, keeps workspace and ACL object owners alive in the task-queue callback, and has no explicit synchronization in the native forward/backward hot path.
 
-Qualified native inputs are non-empty, contiguous, storage-offset-zero FP32 time-major sequences on NPU with a spiking `surrogate.ATan`. LIF requires a fixed Python float `tau > 1`; PLIF transports reciprocal tau as a one-element contiguous FP32 NPU tensor, so `w` and `w.grad` remain live. Only first-order gradients are supported. Native single-step, FP16/BF16, non-ATan or non-spiking surrogates, unsupported layouts, and arbitrary dynamic-shape graphs use observable pre-execution fallback or strict failure.
+Qualified native inputs are rank-two-or-higher FP32 time-major sequences with a non-empty time dimension and non-empty flattened timestep, contiguous storage-offset-zero NPU storage, and a spiking `surrogate.ATan`. LIF requires a fixed Python float `tau > 1`; PLIF transports reciprocal tau as a one-element contiguous FP32 NPU tensor, so `w` and `w.grad` remain live. The native bridge itself accepts only physical `ACL_FORMAT_ND` storage. The FedSNN adapter additionally recognizes real convolutional rank-5 `ACL_FORMAT_NCDHW` outputs, reshapes and clones them into fresh ND storage before launch, and rejects other physical formats before loading or calling the extension. The FedSNN-specific stateless path preserves the application's exact charge ordering, detached soft reset, ATan derivative, and zero membrane at each public forward; it is exposed as `spikingjelly_npu.fedsnn.DecayLIF`. Only first-order gradients are supported. FP16/BF16, non-ATan or non-spiking surrogates, unsupported layouts, and arbitrary dynamic-shape graphs use observable pre-execution fallback or strict failure. Stateful IF/LIF/PLIF nodes in single-step mode intentionally remain on PyTorch even when `backend_strict=True`; strict native enforcement applies to qualified multi-step requests such as `packed_aspy`.
 
 ## AsPy public interface
 
@@ -120,7 +122,7 @@ assert plif_node.last_backend_route.backend == "aspy"
 assert x.grad is not None and plif_node.w.grad is not None
 ```
 
-With `backend_strict=False`, unsupported or unavailable requests fall back to the PyTorch implementation before native execution. With `backend_strict=True`, the same request raises `AsPyBackendError`. Once a native launch starts, failures propagate rather than silently replaying a stateful eager step.
+For qualified multi-step requests, `backend_strict=False` falls back to the PyTorch implementation before native execution and `backend_strict=True` raises `AsPyBackendError`. Single-step IF/LIF/PLIF remains an intentional observable PyTorch compatibility path under either setting. Once a native launch starts, failures propagate rather than silently replaying a stateful eager step.
 
 ## Ordinary PyTorch quick start
 
@@ -178,7 +180,22 @@ import spikingjelly_npu
 spikingjelly_npu.enable_compat()
 ```
 
-This intentionally shadows an installed but not-yet-imported real SpikingJelly package for the documented allowlist. It refuses partial replacement after real SpikingJelly has already been imported. The equivalent environment-gated bootstrap is `SPIKINGJELLY_NPU_COMPAT=spikingjelly`; `SPIKINGJELLY_NPU_COMPAT=ascend` additionally enables torch-npu's official CUDA convenience transfer. See [`docs/fedsnn-integration.md`](docs/fedsnn-integration.md). This release does not claim a formal FedSNN end-to-end training, federated-round, or convergence result.
+This intentionally shadows an installed but not-yet-imported real SpikingJelly package for the documented allowlist. It refuses partial replacement after real SpikingJelly has already been imported. The equivalent environment-gated bootstrap is `SPIKINGJELLY_NPU_COMPAT=spikingjelly`; `SPIKINGJELLY_NPU_COMPAT=ascend` additionally enables torch-npu's official CUDA convenience transfer. See [`docs/fedsnn-integration.md`](docs/fedsnn-integration.md).
+
+The FedSNN AlexNet-BNTT integration backend `packed_aspy` combines `[T*N,...]` ANN packing with the exact stateless decay-LIF AsPy operator. It has passed the qualified Ascend 910B4/CANN 8.5 actual-model gates for full batch 128, remainder 42, train/eval, diagnostic eager fallback, six native LIF routes, BNTT buffers, two SGD updates, and two real trainer smokes. The accepted actual-shape gradient gate is `rtol=5e-5, atol=3e-5`; this is numerical-tolerance equivalence, not bitwise equivalence.
+
+After building and activating AsPy, enable it explicitly in a consumer application that implements the documented six-layer adapter. These YAML keys are from the qualified FedSNN integration seam, not configuration parsed by `spikingjelly_npu` itself:
+
+```yaml
+model:
+  name: fedsnn_alexnet_bntt
+  execution_backend: packed_aspy
+  execution_backend_strict: true
+```
+
+Strict mode is recommended for qualification and deployment because the consumer must reject silent fallback unless all six spiking layers use native AsPy in both train and eval. See the [FedSNN integration guide](docs/fedsnn-integration.md) for the adapter contract, route-diagnosis example, fallback, physical-format, diagnostic, and identity rules.
+
+For CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5, 1706 samples, five balanced fresh-process measurements produced median complete-client times of 5.3214 s for `legacy_stepwise`, 5.0087 s for `packed_eager`, and 4.3882 s for `packed_aspy`. Thus `packed_aspy` reduced median wall time by 12.4% versus `packed_eager` and 17.5% versus `legacy_stepwise`. Every measured AsPy run used 420 native LIF calls with no fallback. This qualifies the execution path for explicit adoption on the tested stack; it is not a federated convergence or multi-seed accuracy claim. Existing running experiments must retain their recorded code/config identity, and `npugraph` remains unqualified for this formal shape. These were externally collected FedSNN qualification results; audit the checked-in [`docs/evidence/packed_aspy_manifest.json`](docs/evidence/packed_aspy_manifest.json) and raw summary JSON, and see [`docs/performance.md`](docs/performance.md) for the exact identity and reproduction boundary.
 
 ## Compatibility boundaries
 
@@ -202,6 +219,8 @@ All AsPy numbers below are component-level measurements on Ascend 910B4 `npu:7`,
 - **PLIF:** fixed `[T,B,F]=[8,64,4096]`; forward + spike/final-state loss + backward for input and `w`; 10 warmups, 50 measured iterations, same synchronization policy, three fresh processes. Run speedups were 5.320089×, 6.337813×, and 4.311383×; median 5.320089×. Three fresh determinism hashes, three 20-step optimizer trajectories, and five dynamic-`w` true-NPUGraph replays passed.
 - **LIF:** fixed-tau forward/backward, carried state, strict/fallback, and true fixed-shape NPUGraph are covered by the full real-NPU AsPy suite. No standalone LIF performance number is claimed.
 - **Full AsPy NPU suite at final PLIF snapshot:** 76 passed.
+
+- **FedSNN AlexNet-BNTT `packed_aspy`:** Ascend 910B4, CANN 8.5.0, Python 3.10.20, torch/torch-npu 2.9.0, FP32, CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5. Five balanced fresh-process measurements, each after one complete-client warmup epoch and synchronized once before/after the measured client, gave medians `legacy_stepwise=5.3214 s`, `packed_eager=5.0087 s`, `packed_aspy=4.3882 s`. The AsPy route was native for all six spiking layers and all 70 measured forwards per run. Actual-model gradients passed at the accepted `rtol=5e-5, atol=3e-5`; this is tolerance equivalence, not bitwise equivalence.
 
 An early scalar, one-core, host-synchronized IF prototype was approximately 189× slower than PyTorch. That result is retained only as historical rejection evidence and does not describe the current vectorized multi-block task-queue implementation.
 

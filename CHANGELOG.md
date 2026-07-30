@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Added an exact stateless FedSNN decay-LIF AsPy forward/backward path and public `spikingjelly_npu.fedsnn.DecayLIF`, preserving multiply-then-add charging, detached soft reset, ATan surrogate, zero-initialized per-forward state, and first-order reverse-time gradients.
+- Added physical-format-safe routing: the native bridge remains `ACL_FORMAT_ND`-only, while the FedSNN adapter accepts rank-5 `ACL_FORMAT_NCDHW` convolutional sequences by copying their flattened view into fresh ND storage; unsupported formats fail or fall back before native execution.
+- Added capability detection and safe fallback for older native bundles that do not expose the FedSNN symbols, without compromising ordinary import safety. The existing `v0.1.0-alpha.1` bundle is explicitly documented as predating `packed_aspy`.
+- Added `MANIFEST.in` so source distributions include the native operator sources, external build scripts, tests, examples, benchmarks, developer documentation, and small qualification evidence summaries needed to audit and extend AsPy rather than shipping only the Python package.
+- Hardened external adoption with qualified-stack source-build preflight and build identity manifests, explicit old-release capability warnings, consumer-adapter boundaries and route diagnosis, native contribution guidance, and checked-in evidence identities/raw summaries.
+- Qualified the actual FedSNN AlexNet-BNTT path on Ascend 910B4/CANN 8.5/torch-npu 2.9 for full batch 128, remainder 42, singleton, train/eval, diagnostics, BNTT buffers, two SGD updates, and six native routes. Gradients passed at `rtol=5e-5, atol=3e-5` as numerical-tolerance rather than bitwise equivalence.
+- Measured five balanced fresh-process complete-client runs for CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5: medians were 5.3214 s `legacy_stepwise`, 5.0087 s `packed_eager`, and 4.3882 s `packed_aspy`, a 12.4% wall reduction versus `packed_eager` and 17.5% versus `legacy_stepwise`.
+- Confirmed with an actual-shape stage profile that packed ANN/BNTT time stayed approximately flat while membrane recurrence fell 53.8%, encoded forward 20.3%, backward 24.5%, and profiled batch wall 21.6% versus `packed_eager`.
+- Passed two consecutive exact-YAML real FedSNN trainer smokes with finite metrics and six native AsPy routes in both training and evaluation. Formal-shape NPUGraph remains unqualified and is not part of this path.
+
 ## 0.1.0 - 2026-07-29
 
 - Added a pure-PyTorch activation-based compatibility subset for IF, LIF, PLIF, surrogates, state helpers, common step-aware layers, and graph-safe FedSNN building blocks.

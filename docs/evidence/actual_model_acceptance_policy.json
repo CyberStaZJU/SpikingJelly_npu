@@ -1,0 +1,9 @@
+{
+  "decision_date": "2026-07-30",
+  "decision_source": "user",
+  "gradient_gate": {"rtol": 5e-05, "atol": 3e-05},
+  "update_gate": {"rtol": 5e-05, "atol": 5e-06},
+  "route_output_gate": "strict logits/loss/spikes from an exactly shared post-update state",
+  "reason_for_state_reset": "avoid amplifying accepted sub-threshold parameter differences through hard spike thresholds when testing routing",
+  "interpretation": "numerical tolerance equivalence for gradients only; strict route output equivalence retained"
+}
