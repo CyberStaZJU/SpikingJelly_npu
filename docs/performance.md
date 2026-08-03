@@ -1,5 +1,29 @@
 # Performance methodology
 
+## Sequence benchmark protocol
+
+`benchmarks/_protocol.py` implements the measurement policy frozen in `docs/evidence/sequence_acceptance_policy.json`. The representative entrypoints are:
+
+- `benchmarks/benchmark_sequence_recurrent.py`: standard RNN/GRU/LSTM and project-defined spiking RNN/GRU/LSTM;
+- `benchmarks/benchmark_sequence_transformer.py`: standard Transformer encoder and decoder stacks;
+- `benchmarks/benchmark_spikformer.py`: SpikingSelfAttention and complete Spikformer.
+
+Formal invocations default to exactly five fresh worker processes. Within every worker the candidate and baseline run once each, with alternating first position across workers. Each implementation records a synchronized cold call, required warmup, per-iteration synchronized samples until at least five seconds of measured work, median/mean/p90 latency, optional peak allocated/reserved device memory, provider-route/native-region/format-conversion hooks, runtime identity, and source/build identity. The orchestrator rejects input, initial-state, workload, schema, or order drift, retains every raw worker record, and reports the median of the five process medians. Formal output from a dirty source tree is explicitly marked evidence-ineligible. Candidate and baseline are intentionally separate hooks even when the current semantic-alpha entrypoints instantiate identical eager references; a future optimization must replace only the candidate builder while preserving the deterministic payload and validation contract.
+
+Example CPU development smoke (not performance evidence):
+
+```bash
+python -m benchmarks.benchmark_sequence_recurrent \
+  --case gru --device cpu \
+  --time-steps 4 --batch-size 2 --input-size 8 --hidden-size 8 \
+  --fresh-processes 1 --warmup-iterations 1 \
+  --minimum-measured-work-seconds 0 --minimum-measured-iterations 2 \
+  --maximum-measured-iterations 4 --smoke \
+  --output "$HOME/.cache/spikingjelly_npu/sequence-gru-smoke.json"
+```
+
+Omit the smoke overrides for the frozen five-process/five-second protocol and use the reference shapes from the acceptance policy. Store every generated JSON outside the checkout. A CPU smoke validates orchestration and schema only; it does not qualify an NPU route or support a performance claim.
+
 ## Optimization hierarchy
 
 1. Pack stateless ANN operators across `[T*N, ...]`.

@@ -186,6 +186,8 @@ model = spikformer_ti(T=4, num_classes=1000, backend="torch")
 
 This release stage establishes eager FP32 semantics, public namespaces, state-dict behavior, CPU tests, observable routing, and import safety. It does **not** claim new RNN/Transformer native acceleration before CANN 8.5 physical qualification. Spiking recurrent equations are project-defined extensions. Spikformer factories provide architecture/configuration compatibility; strict external checkpoint-key/layout compatibility is not claimed. TorchScript is also outside the current recurrent semantic-alpha contract because support varies across PyTorch releases. See [`docs/sequence-acceleration-contract.md`](docs/sequence-acceleration-contract.md) and the frozen [`sequence_acceptance_policy.json`](docs/evidence/sequence_acceptance_policy.json).
 
+Reusable fresh-process sequence benchmark entrypoints are provided for standard and spiking recurrent modules, standard Transformer encoder/decoder stacks, and SpikingSelfAttention/Spikformer. The formal defaults enforce five fresh processes, alternating candidate/baseline first position, a cold call, warmup, at least five seconds of synchronized measured work per implementation/process, deterministic input/state hashes, raw process records, and median-of-five aggregation. `--smoke` permits tiny CPU checks but marks the output non-evidence. Benchmark JSON must be written outside the checkout. See [`docs/performance.md`](docs/performance.md#sequence-benchmark-protocol) for commands and schema boundaries.
+
 ## NPUGraph routing
 
 ```python
