@@ -15,8 +15,12 @@ The package contains **no CuPy, CUDA, or Triton dependency**. Ordinary functiona
   - `surrogate.ATan`, `Sigmoid`, `PiecewiseQuadratic`, `SoftSign`, `SuperSpike`;
   - reset/detach/backend/step-mode helpers and sequence utilities;
   - step-aware Linear, Conv1d/2d/3d, BatchNorm, pooling, flatten, and voting layers.
+- FP32 semantic-alpha sequence/model APIs:
+  - direct eager PyTorch subclasses for standard `RNN`, `GRU`, `LSTM`, multi-head attention, and Transformer encoder/decoder stacks;
+  - project-defined dense spiking RNN/GRU/LSTM cells and sequence modules with explicit or persistent carry state;
+  - canonical token-last `SpikingSelfAttention` and eager Spikformer models/factories.
 - Correct hard/soft reset, `detach_reset`, `store_v_seq`, persistent state, and PLIF `w` state-dict semantics.
-- Packed stateless layers over `[T*N, ...]` and `StaticGraphRunner` fixed-full-batch NPUGraph with visible eager fallback.
+- Packed stateless layers over `[T*N, ...]`, the legacy one-shape `StaticGraphRunner`, and bounded exact-PyTree `GraphBucketRunner` routing with visible eager fallback or strict pre-execution failure.
 - Optional AsPy FP32 multi-step native routes for IF, fixed-tau LIF, learnable-`k` KLIF, dynamic-parameter PLIF, and an exact stateless FedSNN `membrane_decay * membrane + current` decay-LIF scan on Ascend 910B4/CANN 8.5.
 - AsPy first-order ATan-surrogate backward, input/carried-state gradients, KLIF `k.grad`, and PLIF `w.grad`.
 - Real fixed-shape NPUGraph capture/replay for AsPy IF, LIF, and PLIF; PLIF reciprocal tau remains a dynamic device-tensor input during replay.
@@ -155,19 +159,53 @@ functional.reset_net(net)
 y = net(x).mean(0)
 ```
 
+## Sequence and model semantic alpha
+
+```python
+import torch
+from spikingjelly_npu import sequence
+from spikingjelly_npu.activation_based.recurrent import SpikingGRU
+from spikingjelly_npu.activation_based.model import spikformer_ti
+
+# Standard modules preserve torch.nn constructors, parameters, state dicts,
+# PackedSequence behavior, masks, and eager first-order autograd.
+gru = sequence.GRU(64, 128, batch_first=True)
+encoder_layer = sequence.TransformerEncoderLayer(
+    d_model=128, nhead=8, batch_first=True
+)
+
+# Project-defined spiking recurrent modules use dense fixed-length sequences.
+spiking_gru = SpikingGRU(64, 128, batch_first=True, stateful=True)
+output, state = spiking_gru(torch.randn(8, 32, 64))
+spiking_gru.detach()  # explicit TBPTT boundary
+
+# Spikformer accepts [N,C,H,W] or explicit [T,N,C,H,W].
+model = spikformer_ti(T=4, num_classes=1000, backend="torch")
+```
+
+This release stage establishes eager FP32 semantics, public namespaces, state-dict behavior, CPU tests, observable routing, and import safety. It does **not** claim new RNN/Transformer native acceleration before CANN 8.5 physical qualification. Spiking recurrent equations are project-defined extensions. Spikformer factories provide architecture/configuration compatibility; strict external checkpoint-key/layout compatibility is not claimed. TorchScript is also outside the current recurrent semantic-alpha contract because support varies across PyTorch releases. See [`docs/sequence-acceleration-contract.md`](docs/sequence-acceleration-contract.md) and the frozen [`sequence_acceptance_policy.json`](docs/evidence/sequence_acceptance_policy.json).
+
 ## NPUGraph routing
 
 ```python
-from spikingjelly_npu.npu import StaticGraphRunner
+from spikingjelly_npu.npu import GraphBucketRunner, GraphBucketSpec
 
 model = model.to("npu:2").eval()
-runner = StaticGraphRunner(model, batch_size=128)
-logits = runner(full_batch)       # fixed full batch: capture/replay when qualified
-logits = runner(remainder_batch)  # partial batch: eager fallback
+runner = GraphBucketRunner(
+    model,
+    [
+        GraphBucketSpec((full_batch,), name="full"),
+        GraphBucketSpec((remainder_batch,), name="remainder"),
+    ],
+)
+logits = runner(full_batch)       # exact allowlisted signature
+logits = runner(remainder_batch)  # separately captured exact signature
 print(runner.last_route)
 ```
 
-Real fixed-shape NPUGraph is qualified for AsPy IF, LIF, and PLIF as well as the packed model path. Replay requires unchanged argument structure, shape, dtype, device, layout, `requires_grad`, train/eval state, and parameter/buffer identities and storage. Separate train/eval captures are required. Models must declare graph-safe per-forward state or callers must explicitly opt in after verifying it. Training capture is disabled by default; the qualified opt-in path requires deterministic algorithms unless the expert-only override is used. Higher-order differentiation and arbitrary dynamic shapes are unsupported.
+`StaticGraphRunner` remains the one-fixed-batch compatibility facade. `GraphBucketRunner` uses a bounded explicit allowlist and matches the complete tensor PyTree, static kwargs, shape, dtype, device, layout, `requires_grad`, stride, storage offset, memory format, alias groups, mode, and parameter/buffer execution state. Unknown signatures visibly use eager mode or fail before launch in strict mode. Capture cleanup or replay failure poisons the runner; it never eager-replays after graph launch.
+
+Real fixed-shape NPUGraph is qualified for the previously documented AsPy IF, LIF, and PLIF paths. The new general bucket machinery currently has CPU static-buffer replay tests, but it still requires a physical CANN/torch-npu canary for each newly claimed model path. Separate train/eval captures are required. Models must declare graph-safe per-forward state or callers must explicitly opt in after verifying it. Training capture is disabled by default; the qualified opt-in path requires deterministic algorithms unless the expert-only override is used. Higher-order differentiation and arbitrary dynamic shapes are unsupported.
 
 PLIF graph replay reads reciprocal tau from a device tensor. Qualification changed both `w` and input across five fixed-shape replays and checked output, input-gradient, and `w.grad` parity against native eager.
 
@@ -205,8 +243,11 @@ For CIFAR-10 Dirichlet α=0.3 seed-2 client-0, T=4, batch 128, LE=5, 1706 sample
 
 ## Compatibility boundaries
 
-- sequences are time-major `[T,N,...]`;
-- neuron state persists until `reset()` / `reset_net()`;
+- activation-based sequences are time-major `[T,N,...]`; standard `torch.nn` wrappers also preserve `batch_first` and `PackedSequence` behavior;
+- spiking recurrent modules accept dense fixed-length sequences only; ragged/packed inputs and projected spiking LSTM are deferred;
+- neuron and explicitly stateful recurrent state persists until `reset()` / `reset_net()`;
+- Spikformer factory compatibility does not imply universal external checkpoint-key compatibility;
+- recurrent TorchScript is not part of the current semantic-alpha claim;
 - `v` and `v_seq` are not state-dict entries;
 - KLIF stores scalar parameter `k`; PLIF stores scalar parameter `w`;
 - `backend="torch"` works on CPU or NPU tensors;

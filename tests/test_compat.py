@@ -23,12 +23,14 @@ def test_process_local_spikingjelly_alias(monkeypatch):
     from spikingjelly.activation_based import neuron
 
     assert package.activation_based.neuron is neuron
+    assert package.models.__name__ == "spikingjelly_npu.models"
+    assert package.sequence.__name__ == "spikingjelly_npu.sequence"
     assert package.__spikingjelly_npu_alias__
     assert neuron.IFNode.__module__.startswith("spikingjelly_npu")
     _remove_alias(monkeypatch)
 
 
-def test_canonical_layer_and_model_aliases_share_objects(monkeypatch):
+def test_canonical_sequence_and_activation_aliases_share_objects(monkeypatch):
     _remove_alias(monkeypatch)
     monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
     enable_compat(spikingjelly=True, cuda=False, force_alias=True)
@@ -38,6 +40,13 @@ def test_canonical_layer_and_model_aliases_share_objects(monkeypatch):
     from spikingjelly.activation_based.model.spikformer import (
         Spikformer as CanonicalSpikformer,
     )
+    from spikingjelly.activation_based.recurrent import SpikingGRU
+    from spikingjelly.activation_based.transformer import (
+        SpikingSelfAttention as TransformerAttention,
+    )
+    from spikingjelly.models.spikformer import Spikformer as ModelsSpikformer
+    from spikingjelly.sequence.recurrent import LSTM
+    from spikingjelly.sequence.transformer import TransformerEncoderLayer
 
     from spikingjelly_npu.activation_based.layer import (
         SpikingSelfAttention as NpuSpikingSelfAttention,
@@ -51,12 +60,50 @@ def test_canonical_layer_and_model_aliases_share_objects(monkeypatch):
     from spikingjelly_npu.activation_based.model import (
         spikformer_ti as npu_spikformer_ti,
     )
+    from spikingjelly_npu.activation_based.recurrent import SpikingGRU as NpuSpikingGRU
     from spikingjelly_npu.models import Spikformer as LegacySpikformer
+    from spikingjelly_npu.sequence.recurrent import LSTM as NpuLSTM
+    from spikingjelly_npu.sequence.transformer import (
+        TransformerEncoderLayer as NpuTransformerEncoderLayer,
+    )
 
-    assert SpikingSelfAttention is NpuSpikingSelfAttention
-    assert Spikformer is CanonicalSpikformer is NpuSpikformer is LegacySpikformer
+    assert SpikingSelfAttention is TransformerAttention is NpuSpikingSelfAttention
+    assert (
+        Spikformer
+        is CanonicalSpikformer
+        is ModelsSpikformer
+        is NpuSpikformer
+        is LegacySpikformer
+    )
+    assert SpikingGRU is NpuSpikingGRU
+    assert LSTM is NpuLSTM
+    assert TransformerEncoderLayer is NpuTransformerEncoderLayer
     assert spikformer_ti is npu_spikformer_ti
     assert spikformer_s is npu_spikformer_s
+    _remove_alias(monkeypatch)
+
+
+def test_alias_imported_before_canonical_modules_still_reuses_objects(monkeypatch):
+    _remove_alias(monkeypatch)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    install_spikingjelly_alias(force=True)
+
+    alias_recurrent = importlib.import_module("spikingjelly.activation_based.recurrent")
+    alias_transformer = importlib.import_module("spikingjelly.activation_based.transformer")
+    alias_sequence = importlib.import_module("spikingjelly.sequence.recurrent")
+    canonical_recurrent = importlib.import_module(
+        "spikingjelly_npu.activation_based.recurrent"
+    )
+    canonical_transformer = importlib.import_module(
+        "spikingjelly_npu.activation_based.transformer"
+    )
+    canonical_sequence = importlib.import_module("spikingjelly_npu.sequence.recurrent")
+
+    assert alias_recurrent is canonical_recurrent
+    assert alias_transformer is canonical_transformer
+    assert alias_sequence is canonical_sequence
+    assert alias_recurrent.SpikingLSTM is canonical_recurrent.SpikingLSTM
+    assert alias_sequence.GRU is canonical_sequence.GRU
     _remove_alias(monkeypatch)
 
 

@@ -1,3 +1,4 @@
+import copy
 import warnings
 
 import pytest
@@ -20,9 +21,19 @@ from spikingjelly_npu.npu.graph import (
 
 
 class FakeNPU:
+    """CPU test double for routing plus static-input replay bookkeeping.
+
+    The default capture path deep-copies the complete sample tensor tuple, which
+    preserves view metadata and alias groups, then copies every replay tensor into
+    those static buffers before executing the captured wrapper. It is still not a
+    physical NPUGraph qualification, but it detects missing argument copies and
+    PyTree reconstruction bugs that a direct eager wrapper would hide.
+    """
+
     def __init__(self, capture=None):
         self.capture = capture
         self.capture_calls = []
+        self.replay_calls = []
         self.rng_state = torch.tensor([37], dtype=torch.uint8)
         self.restored_rng_states = []
 
@@ -36,7 +47,31 @@ class FakeNPU:
         self.capture_calls.append((wrapper, sample_args, num_warmup_iters))
         if self.capture is not None:
             return self.capture(wrapper, sample_args, num_warmup_iters)
-        return wrapper
+
+        static_args = copy.deepcopy(tuple(sample_args))
+        expected_aliases = tuple(
+            torch._C._is_alias_of(left, right)
+            for left_index, left in enumerate(static_args)
+            for right in static_args[left_index + 1 :]
+        )
+
+        def replay(*tensor_args):
+            if len(tensor_args) != len(static_args):
+                raise RuntimeError("fake graph replay received the wrong tensor count")
+            actual_aliases = tuple(
+                torch._C._is_alias_of(left, right)
+                for left_index, left in enumerate(tensor_args)
+                for right in tensor_args[left_index + 1 :]
+            )
+            if actual_aliases != expected_aliases:
+                raise RuntimeError("fake graph replay alias groups changed")
+            with torch.no_grad():
+                for target, source in zip(static_args, tensor_args, strict=True):
+                    target.copy_(source)
+            self.replay_calls.append(tuple(id(tensor) for tensor in static_args))
+            return wrapper(*static_args)
+
+        return replay
 
 
 class RecurrentMaskModel(nn.Module):
@@ -103,6 +138,8 @@ def test_nested_tuple_state_kwargs_mask_and_five_changed_replays(monkeypatch):
         assert "recurrent-mask" in runner.last_route.reason
 
     assert len(fake_npu.capture_calls) == 1
+    assert len(fake_npu.replay_calls) == 5
+    assert len(set(fake_npu.replay_calls)) == 1
     _, sample_args, _ = fake_npu.capture_calls[0]
     assert len(sample_args) == 4
 

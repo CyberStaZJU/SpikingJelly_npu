@@ -475,7 +475,11 @@ def spikformer_ti(
     num_classes: int = 1000,
     backend: str = "torch",
 ) -> Spikformer:
-    """Return the upstream-compatible Spikformer-Ti configuration."""
+    """Return the Spikformer-Ti architecture/configuration compatibility preset.
+
+    This semantic-alpha implementation does not claim strict checkpoint-key or
+    parameter-layout compatibility with external Spikformer repositories.
+    """
     return Spikformer(
         T=T,
         in_channels=in_channels,
@@ -498,7 +502,11 @@ def spikformer_s(
     num_classes: int = 1000,
     backend: str = "torch",
 ) -> Spikformer:
-    """Return the upstream-compatible Spikformer-S configuration."""
+    """Return the Spikformer-S architecture/configuration compatibility preset.
+
+    This semantic-alpha implementation does not claim strict checkpoint-key or
+    parameter-layout compatibility with external Spikformer repositories.
+    """
     return Spikformer(
         T=T,
         in_channels=in_channels,

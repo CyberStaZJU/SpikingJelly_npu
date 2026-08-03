@@ -2,7 +2,9 @@
 
 ## Target
 
-This release implements the activation-based subset required by FedSNN and common feedforward SNNs. Its compatibility contract is SpikingJelly `0.0.0.0.14`, the version pinned by the current FedSNN lockfile; the KLIF gap audit additionally checked upstream source snapshot `f67935114ab178300be623297b41adef6727622f`. The qualified accelerator stack is Ascend 910B4, CANN 8.5.0, Python 3.10, PyTorch 2.9.0, and torch-npu 2.9.0.
+The stable native contract still covers the activation-based subset required by FedSNN and common feedforward SNNs. Its historical compatibility baseline is SpikingJelly `0.0.0.0.14`, the version pinned by the current FedSNN lockfile; the KLIF gap audit additionally checked upstream source snapshot `f67935114ab178300be623297b41adef6727622f`.
+
+The unreleased semantic alpha adds standard and spiking recurrent/Transformer APIs. Their external semantic audit used current SpikingJelly `master` commit `6de16e441f60e37fce28bc9e6b11ac25039ee239` and standard PyTorch APIs. The qualified accelerator stack remains Ascend 910B4, CANN 8.5.0, Python 3.10, PyTorch 2.9.0, and torch-npu 2.9.0; the newly added sequence/model paths are not yet physical-NPU performance-qualified.
 
 ## Supported APIs
 
@@ -12,7 +14,14 @@ This release implements the activation-based subset required by FedSNN and commo
 | `neuron` | `BaseNode`, `IFNode`, `LIFNode`, `KLIFNode`, `ParametricLIFNode` |
 | `surrogate` | `heaviside`, `Sigmoid`, `ATan`, `PiecewiseQuadratic`, `SoftSign`, `SuperSpike` |
 | `functional` | reset/detach/configuration and sequence helpers |
-| `layer` | Linear, Conv1d/2d/3d, BatchNorm1d/2d/3d, max/average/adaptive-average pooling, Flatten, VotingLayer, SeqToANNContainer |
+| `layer` | Linear, Conv1d/2d/3d, BatchNorm1d/2d/3d, max/average/adaptive-average pooling, Flatten, VotingLayer, SeqToANNContainer, `SpikingSelfAttention` |
+| `sequence.recurrent` | Direct eager subclasses of `torch.nn.RNN`, `GRU`, and `LSTM`, including dense and `PackedSequence` semantics |
+| `sequence.transformer` | Eager `MultiheadAttention`, encoder/decoder layers and stacks, and top-level `Transformer` |
+| `activation_based.recurrent` | Project-defined `SpikingRNN/GRU/LSTM` cells and dense fixed-length sequence wrappers |
+| `activation_based.model.spikformer` | Eager patch stem, blocks, classifier, and `spikformer_ti` / `spikformer_s` presets |
+| `npu.graph` | Legacy `StaticGraphRunner` and bounded exact-signature `GraphBucketRunner` |
+
+Support levels differ: standard sequence modules and the new spiking models currently have eager semantic-alpha support; existing neuron AsPy capabilities retain their previously qualified native status. See `sequence-acceleration-contract.md` for the exact boundary.
 
 ## Semantics
 
@@ -26,6 +35,10 @@ This release implements the activation-based subset required by FedSNN and commo
 - `detach_reset` detaches only the spike used by reset.
 - `store_v_seq=True` stores post-reset voltage for every timestep.
 - Runtime voltage memories are not persistent state-dict entries.
+- Standard recurrent/Transformer wrappers preserve PyTorch constructor, parameter, state-dict, mask, state, dropout, and eager first-order-autograd semantics.
+- Spiking recurrent modules use dense fixed-length `[T,N,F]` (or `batch_first`) inputs, PyTorch-style top-level recurrent parameter names, and non-persistent optional carry state. Their equations are project-defined and versioned in `sequence-acceleration-contract.md`.
+- `SpikingSelfAttention` uses `[T,N,C,L]` and the exact softmax-free `(V @ K^T) @ Q * 0.125` order. Spikformer accepts 4D images or explicit 5D time-major image sequences.
+- Spikformer presets claim architecture/configuration compatibility only; strict loading of arbitrary external checkpoint keys/layouts is not claimed.
 - KLIF applies `h = relu(k * h_pre)` after ordinary LIF charge, fires from `h`, optionally resets using `h / k` and `v_threshold / k` when `scale_reset=True`, and exposes learnable checkpoint key `k` initialized to `1.0`.
 - PLIF initializes `w = -log(init_tau - 1)`, uses `sigmoid(w)` as reciprocal tau, and exposes checkpoint key `w`.
 
@@ -49,6 +62,10 @@ Real fixed-shape NPUGraph capture/replay is qualified for AsPy IF, LIF, and PLIF
 
 ## Unsupported
 
+- New RNN/Transformer/Spikformer native-speed claims before physical CANN 8.5 correctness and five-process performance qualification.
+- TorchScript compatibility for the inherited standard recurrent subclasses in this semantic alpha; support differs across PyTorch versions.
+- `PackedSequence`/ragged inputs for project-defined spiking recurrent modules, projected spiking LSTM, arbitrary dynamic-shape graphs, and incremental Transformer KV cache.
+- Universal external Spikformer checkpoint-key/layout compatibility; an explicit converter and frozen external fixture would be required.
 - General CuPy-compatible arrays, CUDA kernels, or Triton CUDA kernels.
 - Native AsPy single-step execution. Single-step requests use the observable PyTorch fallback when non-strict; strict single-step KLIF raises `AsPyBackendError` because the requested native route is unavailable. IF/LIF/PLIF retain their documented strict-compatible single-step eager path.
 - FP16/BF16 AsPy kernels, non-contiguous/storage-offset inputs, non-ATan surrogates, non-spiking surrogate mode, empty time dimensions, or arbitrary dynamic-shape NPUGraph replay.

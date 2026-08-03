@@ -6,10 +6,15 @@ import sys
 def test_import_does_not_import_torch_npu():
     code = (
         "import sys; import torch; import spikingjelly_npu; "
-        "from spikingjelly_npu.activation_based import neuron; "
+        "from spikingjelly_npu import models, sequence; "
+        "from spikingjelly_npu.activation_based import neuron, recurrent, transformer; "
         "from spikingjelly_npu.activation_based.layer import SpikingSelfAttention; "
         "from spikingjelly_npu.activation_based.model.spikformer import spikformer_ti; "
         "assert SpikingSelfAttention.__name__ == 'SpikingSelfAttention'; "
+        "assert recurrent.SpikingGRU.__name__ == 'SpikingGRU'; "
+        "assert transformer.SpikingSelfAttention is SpikingSelfAttention; "
+        "assert sequence.LSTM.__name__ == 'LSTM'; "
+        "assert models.Spikformer.__name__ == 'Spikformer'; "
         "assert callable(spikformer_ti); "
         "node = neuron.IFNode(backend='aspy', step_mode='m'); "
         "klif = neuron.KLIFNode(backend='aspy', step_mode='m'); "
@@ -44,8 +49,12 @@ def test_enable_compat_canonical_imports_do_not_import_torch_npu():
         "from spikingjelly.activation_based.layer import SpikingSelfAttention; "
         "from spikingjelly.activation_based.model import Spikformer; "
         "from spikingjelly.activation_based.model.spikformer import spikformer_s; "
+        "from spikingjelly.activation_based.recurrent import SpikingLSTM; "
+        "from spikingjelly.sequence.transformer import TransformerDecoderLayer; "
         "assert SpikingSelfAttention.__name__ == 'SpikingSelfAttention'; "
         "assert Spikformer.__name__ == 'Spikformer'; assert callable(spikformer_s); "
+        "assert SpikingLSTM.__name__ == 'SpikingLSTM'; "
+        "assert TransformerDecoderLayer.__name__ == 'TransformerDecoderLayer'; "
         "assert 'torch_npu' not in sys.modules; print('ok')"
     )
     env = os.environ.copy()

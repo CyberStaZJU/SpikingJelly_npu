@@ -1,6 +1,6 @@
 """PyTorch-native spiking neural-network building blocks for Ascend NPU."""
 
-from . import activation_based, fedsnn, npu
+from . import activation_based, fedsnn, models, npu, sequence
 from ._version import __version__
 from .compat import (
     CompatibilityStatus,
@@ -20,5 +20,7 @@ __all__ = [
     "fedsnn",
     "get_compatibility_status",
     "install_spikingjelly_alias",
+    "models",
     "npu",
+    "sequence",
 ]

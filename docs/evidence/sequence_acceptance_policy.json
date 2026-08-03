@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "decision_date": "2026-08-03",
+  "decision_source": "user",
+  "status": "frozen_before_physical_sequence_optimization",
+  "qualified_target": {
+    "device": "Ascend 910B4",
+    "cann": "8.5.0",
+    "python": "3.10",
+    "torch": "2.9.0",
+    "torch_npu": "2.9.0",
+    "dtype": "float32",
+    "autograd": "first_order"
+  },
+  "scope": {
+    "sequence_layout": "dense_fixed_length",
+    "graph_shapes": "finite_explicit_exact_shape_buckets",
+    "training_and_inference": true,
+    "full_remainder_singleton_batches": true,
+    "unsupported": [
+      "fp16_bf16_amp_native",
+      "ragged_or_arbitrary_dynamic_shapes",
+      "native_dropout_before_independent_qualification",
+      "higher_order_gradients",
+      "incremental_transformer_kv_cache",
+      "projected_spiking_lstm",
+      "family_wide_claims_from_one_primitive"
+    ]
+  },
+  "reference_shapes": {
+    "standard_recurrent_hotspot": {
+      "T": 128,
+      "B": 64,
+      "I": 256,
+      "H": 512
+    },
+    "spiking_recurrent": {
+      "T": 64,
+      "B": 64,
+      "I": 256,
+      "H": 512
+    },
+    "transformer_encoder": {
+      "B": 32,
+      "L": 128,
+      "D": 512,
+      "heads": 8,
+      "ffn": 2048
+    },
+    "transformer_decoder": {
+      "B": 16,
+      "target_length": 64,
+      "source_length": 128,
+      "D": 512,
+      "heads": 8,
+      "ffn": 2048
+    },
+    "spikformer": {
+      "T": 4,
+      "B": 64,
+      "tokens": 196,
+      "D": 384,
+      "heads": 6,
+      "minimum_blocks": 4
+    }
+  },
+  "numerical_tolerances": {
+    "standard_recurrent": {
+      "forward_and_state": {"rtol": 0.0001, "atol": 0.00001},
+      "gradient": {"rtol": 0.0002, "atol": 0.00002}
+    },
+    "standard_transformer": {
+      "forward": {"rtol": 0.0002, "atol": 0.00002},
+      "gradient_and_update": {"rtol": 0.0005, "atol": 0.00005}
+    },
+    "spiking_recurrent": {
+      "spike": "exact",
+      "state_and_gradient": {"rtol": 0.00005, "atol": 0.00003},
+      "update": {"rtol": 0.00005, "atol": 0.000005}
+    },
+    "spikformer": {
+      "logits": {"rtol": 0.0002, "atol": 0.00002},
+      "mask_finite_nan_pattern": "exact",
+      "explicit_dropout_mask": "exact"
+    }
+  },
+  "correctness_gates": [
+    "finite_outputs_losses_gradients_and_updates",
+    "all_public_outputs_and_final_states",
+    "all_input_initial_state_weight_bias_and_neuron_parameter_gradients",
+    "full_remainder_and_singleton_batches",
+    "train_and_eval",
+    "two_optimizer_updates",
+    "three_seeds_times_twenty_step_trajectory_for_native_training_claims",
+    "strict_route_has_no_fallback",
+    "physical_format_validation",
+    "no_eager_or_legacy_replay_after_native_or_graph_launch"
+  ],
+  "measurement_protocol": {
+    "fresh_processes": 5,
+    "balanced_interleaved_order": true,
+    "same_input_and_state_hash": true,
+    "cold_call_reported": true,
+    "warmup_required": true,
+    "minimum_measured_work_seconds_per_process": 5,
+    "device_synchronization": "before_and_after_each_measured_region",
+    "report": [
+      "raw_process_medians",
+      "median_of_five",
+      "mean",
+      "p90",
+      "cold_latency",
+      "peak_allocated_hbm",
+      "peak_reserved_hbm",
+      "provider_route",
+      "native_region_count",
+      "format_conversion_bytes",
+      "source_and_build_identity"
+    ]
+  },
+  "performance_gates": {
+    "native_hotspot": {
+      "minimum_speedup": 1.25,
+      "alternative_peak_allocated_memory_reduction_fraction": 0.2,
+      "maximum_latency_regression_with_memory_alternative_fraction": 0.05
+    },
+    "complete_block": {
+      "minimum_speedup": 1.1
+    },
+    "representative_model": {
+      "minimum_speedup": 1.05
+    },
+    "maximum_single_fresh_process_regression_fraction": 0.1
+  },
+  "go_no_go": {
+    "hotspot_fails": "do_not_add_to_public_native_routing",
+    "hotspot_passes_block_fails": "allow_one_profiler_driven_bounded_fusion_then_stop_if_still_failing",
+    "block_passes_model_fails": "retain_only_explicit_experimental_capability_without_end_to_end_claim",
+    "semantic_state_mask_format_or_post_launch_fallback_failure": "reject_regardless_of_speed"
+  },
+  "claim_boundaries": [
+    "lstm_does_not_qualify_rnn_or_gru",
+    "encoder_does_not_qualify_decoder_or_cross_attention",
+    "spiking_self_attention_does_not_qualify_full_spikformer",
+    "inference_does_not_qualify_training",
+    "one_shape_stack_or_dtype_does_not_qualify_others"
+  ]
+}

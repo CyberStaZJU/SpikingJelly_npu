@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from types import ModuleType
 
-from . import activation_based
+from . import activation_based, models, sequence
 
 _COMPAT_ENV = "SPIKINGJELLY_NPU_COMPAT"
 
@@ -48,13 +48,29 @@ def install_spikingjelly_alias(*, force: bool = False) -> ModuleType:
     package.__spikingjelly_npu_alias__ = True
     package.__version__ = "spikingjelly_npu-compat"
     package.activation_based = activation_based
+    package.models = models
+    package.sequence = sequence
     sys.modules["spikingjelly"] = package
     sys.modules["spikingjelly.activation_based"] = activation_based
-    for name in ("base", "functional", "layer", "model", "neuron", "surrogate"):
+    for name in (
+        "base",
+        "functional",
+        "layer",
+        "model",
+        "neuron",
+        "recurrent",
+        "surrogate",
+        "transformer",
+    ):
         sys.modules[f"spikingjelly.activation_based.{name}"] = getattr(activation_based, name)
     sys.modules["spikingjelly.activation_based.model.spikformer"] = (
         activation_based.model.spikformer
     )
+    sys.modules["spikingjelly.models"] = models
+    sys.modules["spikingjelly.models.spikformer"] = models.spikformer
+    sys.modules["spikingjelly.sequence"] = sequence
+    sys.modules["spikingjelly.sequence.recurrent"] = sequence.recurrent
+    sys.modules["spikingjelly.sequence.transformer"] = sequence.transformer
     return package
 
 

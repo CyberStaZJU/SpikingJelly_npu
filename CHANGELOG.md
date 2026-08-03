@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added an FP32 semantic-alpha sequence surface: direct eager PyTorch subclasses for standard RNN/GRU/LSTM (including `PackedSequence` and projected LSTM behavior) and standard multi-head attention/Transformer encoder-decoder APIs with unchanged parameter and state-dict namespaces.
+- Added project-defined spiking RNN/GRU/LSTM cells and dense sequence modules with frozen gate equations, multilayer/bidirectional ordering, explicit or persistent carry state, reset/detach support, PyTorch-style top-level recurrent parameter names, and CPU forward/gradient/update coverage.
+- Added canonical `[T,N,C,L]` softmax-free `SpikingSelfAttention`, eager Spikformer patch stem/blocks/classifier, and Ti/S presets. Factory compatibility is explicitly architecture/configuration-level rather than a universal external checkpoint-key/layout claim.
+- Added public `sequence`, `models`, `activation_based.recurrent`, and `activation_based.transformer` exports plus process-local compatibility aliases that preserve canonical module/class identity in either import order without importing `torch_npu`.
+- Added bounded exact-PyTree `GraphBucketRunner` routing with stride/storage-offset/memory-format/alias signatures, bounded capture slots, capture isolation, fatal cleanup/replay poisoning, and a static-buffer CPU replay test double. Physical NPUGraph qualification remains model- and bucket-specific.
+- Froze the sequence semantic/provider/failure contract and five-process correctness/performance policy in `docs/sequence-acceleration-contract.md` and `docs/evidence/sequence_acceptance_policy.json`. No new sequence-family native acceleration is claimed yet.
 - Added SpikingJelly-compatible `KLIFNode` CPU semantics and a native-eager AsPy FP32 multi-step forward/backward path with hard/soft reset, `detach_reset`, `decay_input`, `scale_reset`, stored voltage sequence, input/carried-state gradients, and learnable scalar `k.grad`. Strict single-step AsPy KLIF requests raise instead of silently using eager PyTorch. KLIF NPUGraph and performance remain explicitly unclaimed.
 - Extended native capability probing to ten symbols and release-bundle reporting to expose KLIF separately from FedSNN decay-LIF support.
 - Added an exact stateless FedSNN decay-LIF AsPy forward/backward path and public `spikingjelly_npu.fedsnn.DecayLIF`, preserving multiply-then-add charging, detached soft reset, ATan surrogate, zero-initialized per-forward state, and first-order reverse-time gradients.
