@@ -1,10 +1,11 @@
 import os
 import subprocess
 import sys
+from typing import get_args
 
 import pytest
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence
 
 from spikingjelly_npu.sequence import recurrent
@@ -111,6 +112,132 @@ RECURRENT_CASES = [
         id="lstm-projected",
     ),
 ]
+
+SCRIPT_CASES = [
+    pytest.param(recurrent.RNN, nn.RNN, id="rnn"),
+    pytest.param(recurrent.GRU, nn.GRU, id="gru"),
+    pytest.param(recurrent.LSTM, nn.LSTM, id="lstm"),
+]
+
+
+class _DenseRNN(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, inputs: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
+        return self.module(inputs, state)
+
+
+class _PackedRNN(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(
+        self, inputs: PackedSequence, state: Tensor
+    ) -> tuple[PackedSequence, Tensor]:
+        return self.module(inputs, state)
+
+
+class _DenseLSTM(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(
+        self, inputs: Tensor, state: tuple[Tensor, Tensor]
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+        return self.module(inputs, state)
+
+
+class _PackedLSTM(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(
+        self, inputs: PackedSequence, state: tuple[Tensor, Tensor]
+    ) -> tuple[PackedSequence, tuple[Tensor, Tensor]]:
+        return self.module(inputs, state)
+
+
+@pytest.mark.parametrize(("wrapper_class", "torch_class"), SCRIPT_CASES)
+def test_recurrent_forward_is_inherited_with_torch_overloads(wrapper_class, torch_class):
+    assert wrapper_class.__bases__ == (torch_class,)
+    assert "forward" not in wrapper_class.__dict__
+    assert wrapper_class.forward is torch_class.forward
+
+    overloads = torch._jit_internal._get_overloaded_methods(
+        wrapper_class.forward,
+        torch_class,
+    )
+    assert overloads is not None
+    assert len(overloads) == 2
+
+    annotations = [overload.__annotations__ for overload in overloads]
+    dense_return = get_args(annotations[0]["return"])
+    packed_return = get_args(annotations[1]["return"])
+    assert annotations[0]["input"] is Tensor
+    assert dense_return[0] is Tensor
+    assert annotations[1]["input"] is PackedSequence
+    assert packed_return[0] is PackedSequence
+    assert annotations[0]["hx"] == annotations[1]["hx"]
+    assert dense_return[1] == packed_return[1]
+
+
+def _script_recurrent_container(module_class, module):
+    container_class = _DenseLSTM if module_class is nn.LSTM else _DenseRNN
+    packed_container_class = _PackedLSTM if module_class is nn.LSTM else _PackedRNN
+    try:
+        return (
+            torch.jit.script(container_class(module)),
+            torch.jit.script(packed_container_class(module)),
+        )
+    except (AssertionError, RuntimeError) as error:
+        if "Overloads are not usable when a module is redeclared" not in str(error):
+            raise
+        pytest.skip(f"installed torch cannot script an inherited recurrent subclass: {error}")
+
+
+@pytest.mark.parametrize(("wrapper_class", "torch_class"), SCRIPT_CASES)
+def test_recurrent_torchscript_dense_and_packed(wrapper_class, torch_class):
+    kwargs = {
+        "input_size": 3,
+        "hidden_size": 4,
+        "num_layers": 1,
+        "dropout": 0.0,
+        "batch_first": True,
+    }
+    torch.manual_seed(10)
+    eager = wrapper_class(**kwargs).eval()
+    scripted_dense, scripted_packed = _script_recurrent_container(torch_class, eager)
+
+    inputs = torch.randn(3, 5, kwargs["input_size"])
+    state = _make_state(torch_class, kwargs, batch_size=3)
+    if isinstance(state, tuple):
+        state = tuple(value.float() for value in state)
+    else:
+        state = state.float()
+    expected_dense = eager(inputs, state)
+    actual_dense = scripted_dense(inputs, state)
+    _assert_nested_close(actual_dense, expected_dense)
+
+    packed = pack_padded_sequence(
+        inputs,
+        torch.tensor([5, 3, 4]),
+        batch_first=True,
+        enforce_sorted=False,
+    )
+    expected_packed, expected_state = eager(packed, state)
+    actual_packed, actual_state = scripted_packed(packed, state)
+
+    assert type(actual_packed).__name__ == "PackedSequence"
+    torch.testing.assert_close(actual_packed.data, expected_packed.data)
+    torch.testing.assert_close(actual_packed.batch_sizes, expected_packed.batch_sizes)
+    torch.testing.assert_close(actual_packed.sorted_indices, expected_packed.sorted_indices)
+    torch.testing.assert_close(actual_packed.unsorted_indices, expected_packed.unsorted_indices)
+    _assert_nested_close(actual_state, expected_state)
 
 
 @pytest.mark.parametrize("training", [False, True], ids=["eval", "train"])

@@ -4,24 +4,15 @@ from torch import nn
 
 
 class RNN(nn.RNN):
-    """A direct :class:`torch.nn.RNN` subclass using the eager Torch forward."""
-
-    def forward(self, input, hx=None):
-        return super().forward(input, hx)
+    """A direct :class:`torch.nn.RNN` subclass."""
 
 
 class GRU(nn.GRU):
-    """A direct :class:`torch.nn.GRU` subclass using the eager Torch forward."""
-
-    def forward(self, input, hx=None):
-        return super().forward(input, hx)
+    """A direct :class:`torch.nn.GRU` subclass."""
 
 
 class LSTM(nn.LSTM):
-    """A direct :class:`torch.nn.LSTM` subclass using the eager Torch forward."""
-
-    def forward(self, input, hx=None):
-        return super().forward(input, hx)
+    """A direct :class:`torch.nn.LSTM` subclass."""
 
 
 __all__ = ["RNN", "GRU", "LSTM"]
