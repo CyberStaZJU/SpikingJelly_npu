@@ -1,5 +1,6 @@
 import copy
-import warnings
+import sys
+import types
 
 import pytest
 import torch
@@ -21,6 +22,8 @@ from spikingjelly_npu.npu.graph import (
     GraphPreExecutionError,
     StaticGraphRunner,
     _CaptureStateError,
+    _physical_device_format,
+    _PhysicalFormatInspectionError,
 )
 
 
@@ -106,6 +109,141 @@ def enable_fake_npu(monkeypatch, runner, fake_npu):
 
 def assert_same(actual, expected):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_physical_device_format_is_cpu_import_safe(monkeypatch):
+    imports = []
+
+    def fail_import(name):
+        imports.append(name)
+        raise AssertionError("CPU signatures must not import torch_npu")
+
+    monkeypatch.setattr("importlib.import_module", fail_import)
+
+    assert _physical_device_format(torch.zeros(2, 3)) is None
+    assert imports == []
+
+
+def test_physical_device_format_uses_torch_npu_api(monkeypatch):
+    tensor = types.SimpleNamespace(device=types.SimpleNamespace(type="npu"))
+    fake_torch_npu = types.SimpleNamespace(get_npu_format=lambda value: 29)
+    monkeypatch.setitem(sys.modules, "torch_npu", fake_torch_npu)
+
+    assert _physical_device_format(tensor) == 29
+
+
+def test_physical_device_format_uses_registered_op_fallback(monkeypatch):
+    tensor = types.SimpleNamespace(device=types.SimpleNamespace(type="npu"))
+    monkeypatch.setitem(sys.modules, "torch_npu", types.SimpleNamespace())
+    fake_npu_ops = types.SimpleNamespace(get_npu_format=lambda value: 30)
+    monkeypatch.setattr(torch.ops, "npu", fake_npu_ops, raising=False)
+
+    assert _physical_device_format(tensor) == 30
+
+
+def test_physical_device_format_fails_closed_without_runtime_api(monkeypatch):
+    tensor = types.SimpleNamespace(device=types.SimpleNamespace(type="npu"))
+    monkeypatch.setitem(sys.modules, "torch_npu", types.SimpleNamespace())
+    monkeypatch.delattr(torch.ops, "npu", raising=False)
+
+    with pytest.raises(
+        _PhysicalFormatInspectionError,
+        match="does not expose get_npu_format",
+    ):
+        _physical_device_format(tensor)
+
+
+def test_graph_bucket_physical_format_mismatch_routes_before_graph_execution(
+    monkeypatch,
+):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    physical_format = [2]
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: physical_format[0],
+    )
+    bucket = GraphBucketSpec((sample,))
+    runner = GraphBucketRunner(model, [bucket])
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(sample)
+    assert runner.last_route.backend == "npugraph"
+    assert len(fake_npu.capture_calls) == 1
+    assert len(fake_npu.replay_calls) == 1
+
+    physical_format[0] = 29
+    eager_calls_before = model.calls
+    output = runner(torch.ones_like(sample))
+    assert output.shape == (2, 2)
+    assert runner.last_route.backend == "eager"
+    assert "allowlist" in runner.last_route.reason
+    assert model.calls == eager_calls_before + 1
+    assert len(fake_npu.capture_calls) == 1
+    assert len(fake_npu.replay_calls) == 1
+
+
+def test_graph_bucket_physical_format_mismatch_strict_rejects_without_execution(
+    monkeypatch,
+):
+    sample = torch.zeros(2, 3)
+    physical_format = [2]
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: physical_format[0],
+    )
+    bucket = GraphBucketSpec((sample,))
+    model = LinearModel().eval()
+    runner = GraphBucketRunner(model, [bucket], strict=True)
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(sample)
+    calls_before = model.calls
+    replay_before = len(fake_npu.replay_calls)
+    physical_format[0] = 30
+    with pytest.raises(GraphPreExecutionError, match="allowlist") as captured:
+        runner(torch.ones_like(sample))
+
+    assert captured.value.route is runner.last_route
+    assert model.calls == calls_before
+    assert len(fake_npu.capture_calls) == 1
+    assert len(fake_npu.replay_calls) == replay_before
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_graph_bucket_format_query_failure_uses_pre_execution_route(
+    monkeypatch, strict
+):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((sample,))],
+        strict=strict,
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: (_ for _ in ()).throw(
+            _PhysicalFormatInspectionError("format probe unavailable")
+        ),
+    )
+
+    if strict:
+        with pytest.raises(GraphPreExecutionError, match="format probe unavailable"):
+            runner(sample)
+        assert model.calls == 0
+    else:
+        output = runner(sample)
+        assert output.shape == (2, 2)
+        assert model.calls == 1
+    assert runner.last_route.backend == "eager"
+    assert "format probe unavailable" in runner.last_route.reason
+    assert fake_npu.capture_calls == []
+    assert fake_npu.replay_calls == []
 
 
 def test_nested_tuple_state_kwargs_mask_and_five_changed_replays(monkeypatch):
@@ -535,6 +673,125 @@ def test_parameter_version_change_invalidates_every_bucket_immediately(monkeypat
     assert set(runner._captures) == {0}
 
 
+def test_parameter_physical_format_change_recaptures_before_replay(monkeypatch):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    parameter_formats = {id(model.linear.weight): 2, id(model.linear.bias): 2}
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: parameter_formats.get(id(tensor)),
+    )
+    runner = GraphBucketRunner(model, [GraphBucketSpec((sample,))])
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(sample)
+    replay_count = len(fake_npu.replay_calls)
+    parameter_formats[id(model.linear.weight)] = 29
+    runner(sample)
+
+    assert len(fake_npu.capture_calls) == 2
+    assert len(fake_npu.replay_calls) == replay_count + 1
+    assert runner.last_route.backend == "npugraph"
+
+
+def test_physical_format_queries_all_finish_before_capture_launch(monkeypatch):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    events = []
+
+    def inspect_format(tensor):
+        events.append(("format", id(tensor)))
+        return 2
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        events.append(("capture", None))
+        return wrapper
+
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        inspect_format,
+    )
+    runner = GraphBucketRunner(model, [GraphBucketSpec((sample,))])
+    fake_npu = FakeNPU(capture)
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(sample)
+
+    capture_index = next(
+        index for index, event in enumerate(events) if event[0] == "capture"
+    )
+    assert capture_index > 0
+    assert all(event[0] == "format" for event in events[:capture_index])
+    assert all(event[0] != "format" for event in events[capture_index + 1 :])
+
+
+def test_parameter_mutation_during_capture_restores_value_and_poisons(monkeypatch):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    weight_before = model.linear.weight.detach().clone()
+    runner = GraphBucketRunner(model, [GraphBucketSpec((sample,))])
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        with torch.no_grad():
+            wrapper.model.linear.weight.add_(1)
+        return wrapper
+
+    fake_npu = FakeNPU(capture)
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    with pytest.raises(_CaptureStateError, match="model parameters") as first:
+        runner(sample)
+    assert "changed during NPUGraph capture" in str(first.value.__cause__)
+    torch.testing.assert_close(model.linear.weight, weight_before)
+    calls_after_failure = model.calls
+
+    with pytest.raises(_CaptureStateError, match="model parameters"):
+        runner(torch.randn(7, 3))
+    assert model.calls == calls_after_failure == 0
+
+
+@pytest.mark.parametrize("mutation", ["replace", "storage", "version_bypass"])
+def test_capture_parameter_identity_storage_and_bitwise_guards(monkeypatch, mutation):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+    original_parameter = model.linear.weight
+    original_pointer = original_parameter.data_ptr()
+    original_value = original_parameter.detach().clone()
+    runner = GraphBucketRunner(model, [GraphBucketSpec((sample,))])
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        weight = wrapper.model.linear.weight
+        if mutation == "replace":
+            wrapper.model.linear.weight = nn.Parameter(weight.detach().clone())
+        elif mutation == "storage":
+            weight.data = weight.detach().clone()
+        else:
+            weight.data.add_(1)
+        return wrapper
+
+    fake_npu = FakeNPU(capture)
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    with pytest.raises(_CaptureStateError, match="model parameters") as first:
+        runner(sample)
+    assert "changed during NPUGraph capture" in str(first.value.__cause__)
+    if mutation == "version_bypass":
+        assert model.linear.weight is original_parameter
+        assert model.linear.weight.data_ptr() == original_pointer
+        torch.testing.assert_close(model.linear.weight, original_value)
+    elif mutation == "storage":
+        assert model.linear.weight is original_parameter
+        assert model.linear.weight.data_ptr() != original_pointer
+    else:
+        assert model.linear.weight is not original_parameter
+
+    with pytest.raises(_CaptureStateError, match="model parameters"):
+        runner(torch.randn(7, 3))
+    assert model.calls == 0
+    assert len(fake_npu.capture_calls) == 1
+
+
 def test_total_capture_slots_stay_bounded_across_subtree_training_modes(monkeypatch):
     class MixedModeModel(nn.Module):
         _spikingjelly_npu_graph_safe = True
@@ -666,39 +923,34 @@ def test_strict_hooks_raise_before_capture_or_eager(monkeypatch):
     assert fake_npu.capture_calls == []
 
 
-def test_per_bucket_capture_failure_isolation(monkeypatch):
+def test_capture_launch_failure_poisons_all_bucket_paths_without_eager(monkeypatch):
     model = LinearModel().eval()
     runner = GraphBucketRunner(
         model,
         [
             GraphBucketSpec((torch.zeros(2, 3),), name="bad"),
-            GraphBucketSpec((torch.zeros(4, 3),), name="good"),
+            GraphBucketSpec((torch.zeros(4, 3),), name="unused"),
         ],
     )
 
     def capture(wrapper, sample_args, num_warmup_iters):
-        if sample_args[0].shape[0] == 2:
-            raise RuntimeError("unsupported exact shape")
-        return wrapper
+        wrapper(*sample_args)
+        raise RuntimeError("unsupported exact shape")
 
     fake_npu = FakeNPU(capture)
     enable_fake_npu(monkeypatch, runner, fake_npu)
 
-    with pytest.warns(RuntimeWarning, match="unsupported exact shape"):
-        failed_output = runner(torch.randn(2, 3))
-    assert failed_output.shape == (2, 2)
-    assert runner.last_route.backend == "eager"
-
-    good_output = runner(torch.randn(4, 3))
-    assert good_output.shape == (4, 2)
-    assert runner.last_route.backend == "npugraph"
-
-    with warnings.catch_warnings(record=True) as seen:
+    with pytest.raises(_CaptureStateError, match="capture failed after launch") as first:
         runner(torch.randn(2, 3))
-    assert seen == []
-    assert "prior capture failed" in runner.last_route.reason
-    assert len(fake_npu.capture_calls) == 2
-    assert len(runner.capture_errors) == 1
+    assert "unsupported exact shape" in str(first.value.__cause__)
+    calls_after_failure = model.calls
+
+    for later in (torch.randn(2, 3), torch.randn(4, 3), torch.randn(7, 3)):
+        with pytest.raises(_CaptureStateError, match="capture failed after launch"):
+            runner(later)
+
+    assert model.calls == calls_after_failure == 1
+    assert len(fake_npu.capture_calls) == 1
 
 
 def test_fatal_cleanup_failure_poisons_entire_runner(monkeypatch):
@@ -813,16 +1065,25 @@ def test_cleanup_order_restores_all_categories_after_early_failures(monkeypatch)
         calls.append("cpu_rng")
         raise RuntimeError("CPU RNG restore failed")
 
+    def fail_parameters(snapshot):
+        calls.append("parameters")
+        raise RuntimeError("parameter restore failed")
+
     def fail_structure(snapshot):
         calls.append("structure")
         raise RuntimeError("structure restore failed")
 
+    monkeypatch.setattr(runner, "_restore_parameters", fail_parameters)
     monkeypatch.setattr(runner, "_restore_buffers", fail_buffers)
     monkeypatch.setattr(runner, "_restore_gradients", fail_gradients)
     monkeypatch.setattr(runner, "_restore_runtime_memories", fail_memories)
     monkeypatch.setattr(runner, "_restore_training_modes", fail_training)
     monkeypatch.setattr(torch.random, "set_rng_state", fail_cpu_rng)
-    monkeypatch.setattr(runner, "_validate_capture_structure", fail_structure)
+    monkeypatch.setattr(
+        runner,
+        "_finalize_module_structure_after_capture",
+        fail_structure,
+    )
     fake_npu.set_rng_state = lambda state, device: (
         calls.append("npu_rng"),
         (_ for _ in ()).throw(RuntimeError("NPU RNG restore failed")),
@@ -832,6 +1093,7 @@ def test_cleanup_order_restores_all_categories_after_early_failures(monkeypatch)
         runner(sample)
 
     assert calls == [
+        "parameters",
         "buffers",
         "gradients",
         "memories",
@@ -841,6 +1103,7 @@ def test_cleanup_order_restores_all_categories_after_early_failures(monkeypatch)
         "structure",
     ]
     message = str(error_info.value)
+    assert "model parameters" in message
     assert "model buffers" in message
     assert "parameter gradients" in message
     assert "runtime memories" in message

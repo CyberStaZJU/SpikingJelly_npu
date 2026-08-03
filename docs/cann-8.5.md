@@ -106,7 +106,7 @@ Real NPUGraph capture/replay is qualified for fixed-shape AsPy IF, LIF, and PLIF
 
 General restrictions remain:
 
-- fixed shapes, dtypes, device, layout, argument structure, and `requires_grad` state;
+- fixed shapes, dtypes, device, logical layout, runtime-reported Ascend physical format, argument structure, and `requires_grad` state;
 - tensor-only sample arguments;
 - only graph-capturable ACLNN operators;
 - no module hooks at capture time;
@@ -117,7 +117,7 @@ General restrictions remain:
 - partial batches and diagnostics remain eager only in non-strict compatibility mode; strict mode rejects them before model execution;
 - hard spike thresholds can amplify small nondeterministic kernel differences.
 
-`StaticGraphRunner` enforces the full-batch/ordinary-forward routing policy and records a fallback reason. With `strict=False`, known pre-capture rejections use observable eager fallback. With `strict=True`, every such rejection raises `GraphPreExecutionError` carrying the rejected route before any eager model call; capture-attempt exceptions still propagate unchanged, and no failure after graph launch is eager-replayed. Models must declare graph-safe per-forward state or callers must explicitly set `assume_graph_safe=True`; do not opt in models whose persistent neuron memory can be consumed by capture warmups. Training capture is disabled by default and requires both `allow_training=True` and, by default, `torch.use_deterministic_algorithms(True, warn_only=False)`. Warn-only mode is not qualified. The deterministic requirement is tracked as capture state, so changing it invalidates and rebuilds a graph. The expert-only `require_deterministic_training=False` override must not be used for formal SNN training without independent parity evidence.
+`StaticGraphRunner` enforces the full-batch/ordinary-forward routing policy and records a fallback reason. With `strict=False`, known pre-capture rejections use observable eager fallback. With `strict=True`, every such rejection raises `GraphPreExecutionError` carrying the rejected route before any eager model call. Failure to inspect the runtime Ascend physical format is also a pre-execution rejection: non-strict mode executes eager exactly once and strict mode raises before model, capture, or replay execution. Once `torch.npu.make_graphed_callables` is entered, capture exceptions, parameter mutation, cleanup failures, and replay exceptions are fatal and poison the whole runner; no eager replay is allowed. Post-launch cleanup does not query physical formats. It restores buffers, gradients, runtime memories, mixed training modes, and CPU/NPU RNG; parameter values, storage, and versions must remain unchanged, with accidental value mutation restored only to leave the canonical eager model uncorrupted before the runner fails closed. Models must declare graph-safe per-forward state or callers must explicitly set `assume_graph_safe=True`; do not opt in models whose persistent neuron memory can be consumed by capture warmups. Training capture is disabled by default and requires both `allow_training=True` and, by default, `torch.use_deterministic_algorithms(True, warn_only=False)`. Warn-only mode is not qualified. The deterministic requirement is tracked as capture state, so changing it invalidates and rebuilds a graph. The expert-only `require_deterministic_training=False` override must not be used for formal SNN training without independent parity evidence.
 
 ## AMP
 

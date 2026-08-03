@@ -27,6 +27,11 @@ def test_import_does_not_import_torch_npu():
         "assert klif.last_backend_route.backend == 'torch'; "
         "assert plif.last_backend_route.backend == 'torch'; "
         "assert decay.last_backend_route.backend == 'torch'; "
+        "from spikingjelly_npu.npu import GraphBucketSpec, StaticGraphRunner; "
+        "bucket = GraphBucketSpec((torch.zeros(2, 3),)); "
+        "assert bucket.expected_batch_size == 2; "
+        "runner = StaticGraphRunner(torch.nn.Identity(), batch_size=2, assume_graph_safe=True); "
+        "assert runner(torch.zeros(2, 3)).shape == (2, 3); "
         "assert 'torch_npu' not in sys.modules; print('ok')"
     )
     env = os.environ.copy()

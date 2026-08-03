@@ -8,6 +8,7 @@ from spikingjelly_npu.npu.graph import (
     GraphPreExecutionError,
     StaticGraphRunner,
     _CaptureStateError,
+    _PhysicalFormatInspectionError,
 )
 
 
@@ -389,6 +390,79 @@ def test_mismatched_capture_signature_stays_eager(monkeypatch):
     assert "signature" in runner.last_route.reason
 
 
+@pytest.mark.parametrize("strict", [False, True])
+def test_static_physical_format_mismatch_rejects_before_replay(
+    monkeypatch, strict
+):
+    model = DiagnosticModel().eval()
+    physical_format = [2]
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: physical_format[0]
+        if tuple(tensor.shape) == (4, 3)
+        else 2,
+    )
+    runner = StaticGraphRunner(
+        model,
+        batch_size=4,
+        strict=strict,
+        assume_graph_safe=True,
+    )
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    replay_calls = []
+    runner._graphed = lambda inputs: replay_calls.append(inputs) or model(inputs)
+    runner._captured_training_state = runner._module_training_state()
+    runner._captured_deterministic_state = runner._deterministic_capture_state()
+    runner._captured_structure_signature = runner._module_structure_signature()
+    runner._capture_signature = runner._input_signature(torch.randn(4, 3))
+
+    physical_format[0] = 29
+    if strict:
+        with pytest.raises(GraphPreExecutionError, match="input signature"):
+            runner(torch.randn(4, 3))
+        assert model.calls == []
+    else:
+        output = runner(torch.randn(4, 3))
+        assert output.shape == (4, 2)
+        assert len(model.calls) == 1
+    assert replay_calls == []
+    assert runner.last_route.backend == "eager"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_static_format_query_failure_uses_pre_execution_route(monkeypatch, strict):
+    model = DiagnosticModel().eval()
+    runner = StaticGraphRunner(
+        model,
+        batch_size=4,
+        strict=strict,
+        assume_graph_safe=True,
+    )
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    capture_calls = []
+    monkeypatch.setattr(runner, "_capture", lambda sample: capture_calls.append(sample))
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        lambda tensor: (_ for _ in ()).throw(
+            _PhysicalFormatInspectionError("static format probe unavailable")
+        ),
+    )
+
+    if strict:
+        with pytest.raises(
+            GraphPreExecutionError,
+            match="static format probe unavailable",
+        ):
+            runner(torch.randn(4, 3))
+        assert model.calls == []
+    else:
+        output = runner(torch.randn(4, 3))
+        assert output.shape == (4, 2)
+        assert len(model.calls) == 1
+    assert capture_calls == []
+    assert runner.last_route.backend == "eager"
+
+
 def test_module_hooks_force_eager_without_capture(monkeypatch):
     model = DiagnosticModel()
     runner = StaticGraphRunner(
@@ -442,6 +516,71 @@ def test_parameter_replacement_invalidates_existing_capture(monkeypatch):
     assert output.shape == (4, 2)
     assert len(captured_samples) == 1
     assert runner.last_route.backend == "npugraph"
+
+
+def test_static_physical_format_queries_finish_before_capture_launch(monkeypatch):
+    model = DiagnosticModel().eval()
+    runner = StaticGraphRunner(model, batch_size=4, assume_graph_safe=True)
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    events = []
+
+    def inspect_format(tensor):
+        events.append(("format", id(tensor)))
+        return 2
+
+    fake_npu = type("FakeNPU", (), {})()
+    fake_npu.get_rng_state = lambda _device: torch.tensor([31], dtype=torch.uint8)
+    fake_npu.set_rng_state = lambda _state, _device: None
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        events.append(("capture", None))
+        return wrapper
+
+    fake_npu.make_graphed_callables = capture
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+    monkeypatch.setattr(
+        "spikingjelly_npu.npu.graph._physical_device_format",
+        inspect_format,
+    )
+
+    runner(torch.randn(4, 3))
+
+    capture_index = next(
+        index for index, event in enumerate(events) if event[0] == "capture"
+    )
+    assert capture_index > 0
+    assert all(event[0] == "format" for event in events[:capture_index])
+    assert all(event[0] != "format" for event in events[capture_index + 1 :])
+
+
+def test_static_parameter_mutation_during_capture_restores_value_and_poisons(
+    monkeypatch,
+):
+    model = DiagnosticModel().eval()
+    weight_before = model.linear.weight.detach().clone()
+    runner = StaticGraphRunner(model, batch_size=4, assume_graph_safe=True)
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    fake_npu = type("FakeNPU", (), {})()
+    fake_npu.get_rng_state = lambda _device: torch.tensor([33], dtype=torch.uint8)
+    fake_npu.set_rng_state = lambda _state, _device: None
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        with torch.no_grad():
+            wrapper.model.linear.weight.add_(1)
+        return wrapper
+
+    fake_npu.make_graphed_callables = capture
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+
+    with pytest.raises(_CaptureStateError, match="model parameters") as first:
+        runner(torch.randn(4, 3))
+    assert "changed during NPUGraph capture" in str(first.value.__cause__)
+    torch.testing.assert_close(model.linear.weight, weight_before)
+    calls_after_failure = list(model.calls)
+
+    with pytest.raises(_CaptureStateError, match="model parameters"):
+        runner(torch.randn(2, 3))
+    assert model.calls == calls_after_failure == []
 
 
 def test_capture_preserves_mixed_module_training_modes(monkeypatch):
@@ -789,55 +928,68 @@ def test_multiple_cleanup_failures_are_aggregated(monkeypatch):
         raise AssertionError("all cleanup failures must be reported as fatal")
 
 
-def test_capture_failure_falls_back_once(monkeypatch):
-    model = DiagnosticModel()
-    runner = StaticGraphRunner(
-        model,
-        batch_size=4,
-        allow_training=True,
-        require_deterministic_training=False,
-        assume_graph_safe=True,
-    )
-    monkeypatch.setattr(type(runner), "device_type", property(lambda self: "npu"))
-
-    def fail(_sample):
-        raise RuntimeError("unsupported op")
-
-    monkeypatch.setattr(runner, "_capture", fail)
-    with warnings.catch_warnings(record=True) as seen:
-        warnings.simplefilter("always")
-        runner(torch.randn(4, 3))
-        runner(torch.randn(4, 3))
-    assert len(seen) == 1
-    assert "unsupported op" in runner.capture_error
-    assert "prior capture failed" in runner.last_route.reason
-
-
-def test_strict_capture_failure_propagates_original_and_then_structured_rejection(
-    monkeypatch,
-):
+def test_static_replay_launch_failure_poisons_every_later_path(monkeypatch):
     model = DiagnosticModel().eval()
     runner = StaticGraphRunner(
         model,
         batch_size=4,
-        strict=True,
         assume_graph_safe=True,
     )
     monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
-    capture_error = RuntimeError("unsupported op")
-    monkeypatch.setattr(
-        runner,
-        "_capture",
-        lambda sample: (_ for _ in ()).throw(capture_error),
+    runner._graphed = lambda inputs: (_ for _ in ()).throw(
+        RuntimeError("static launch failed")
     )
+    runner._captured_training_state = runner._module_training_state()
+    runner._captured_deterministic_state = runner._deterministic_capture_state()
+    runner._captured_structure_signature = runner._module_structure_signature()
+    runner._capture_signature = runner._input_signature(torch.randn(4, 3))
 
-    with pytest.raises(RuntimeError, match="unsupported op") as first:
+    with pytest.raises(_CaptureStateError, match="replay failed") as first:
         runner(torch.randn(4, 3))
-    assert first.value is capture_error
-    assert model.calls == []
-    assert "unsupported op" in runner.capture_error
+    assert "static launch failed" in str(first.value.__cause__)
+    calls_after_failure = list(model.calls)
 
-    with pytest.raises(GraphPreExecutionError, match="prior capture failed") as second:
+    for later in (
+        lambda: runner(torch.randn(4, 3)),
+        lambda: runner(torch.randn(2, 3)),
+        lambda: runner(torch.randn(4, 3), scale=2.0),
+    ):
+        with pytest.raises(_CaptureStateError, match="replay failed"):
+            later()
+    assert model.calls == calls_after_failure == []
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_static_capture_launch_failure_poisons_every_later_path(monkeypatch, strict):
+    model = DiagnosticModel().eval()
+    runner = StaticGraphRunner(
+        model,
+        batch_size=4,
+        strict=strict,
+        assume_graph_safe=True,
+    )
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    fake_npu = type("FakeNPU", (), {})()
+    fake_npu.get_rng_state = lambda _device: torch.tensor([29], dtype=torch.uint8)
+    fake_npu.set_rng_state = lambda _state, _device: None
+
+    def fail_after_launch(wrapper, sample_args, num_warmup_iters):
+        wrapper(*sample_args)
+        raise RuntimeError("unsupported op")
+
+    fake_npu.make_graphed_callables = fail_after_launch
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+
+    with pytest.raises(_CaptureStateError, match="capture failed after launch") as first:
         runner(torch.randn(4, 3))
-    assert second.value.route is runner.last_route
-    assert model.calls == []
+    assert "unsupported op" in str(first.value.__cause__)
+    calls_after_failure = list(model.calls)
+
+    for later in (
+        lambda: runner(torch.randn(4, 3)),
+        lambda: runner(torch.randn(2, 3)),
+        lambda: runner(torch.randn(4, 3), scale=2.0),
+    ):
+        with pytest.raises(_CaptureStateError, match="capture failed after launch"):
+            later()
+    assert model.calls == calls_after_failure == [(4, 1.0)]

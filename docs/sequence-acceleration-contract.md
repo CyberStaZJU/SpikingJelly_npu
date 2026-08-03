@@ -136,11 +136,16 @@ The opt-in process-local `spikingjelly` alias registers these modules canonicall
 
 - positional/keyword tree structure, caller keyword insertion order, and immutable static values;
 - tensor shape, dtype, device, layout, `requires_grad`;
-- stride, storage offset, contiguous memory-format classification;
+- stride, storage offset, contiguous memory-format classification, and the runtime-reported Ascend physical format;
 - alias/storage groups;
 - train/eval state, deterministic-training policy, module structure, parameter and buffer identity/version.
 
-The default maximum is eight declared buckets. Unknown signatures use observable eager fallback or strict pre-execution failure. `StaticGraphRunner(strict=True)` applies the same pre-execution rule to every known rejection before capture/replay: it raises `GraphPreExecutionError` carrying the rejected `GraphRoute` and never calls the eager model. Non-strict mode keeps the compatibility fallback. An exception from the capture attempt itself propagates unchanged; subsequent strict calls report a structured prior-capture rejection. Capture failure is isolated to that bucket in `GraphBucketRunner`. Failure to restore buffers, gradients, runtime memories, training state, RNG, or module structure poisons the runner. Replay failure after launch also poisons the runner and never triggers eager replay.
+If the Ascend physical format cannot be inspected before capture or replay, that
+call is rejected before graph execution: non-strict routing performs one observable
+eager call, while strict routing raises `GraphPreExecutionError` without invoking
+the model. No format query is deferred until after graph launch.
+
+The default maximum is eight declared buckets. Unknown signatures use observable eager fallback or strict pre-execution failure. `StaticGraphRunner(strict=True)` applies the same pre-execution rule to every known rejection before capture/replay: it raises `GraphPreExecutionError` carrying the rejected `GraphRoute` and never calls the eager model. Non-strict mode keeps the compatibility fallback only while graph execution is known not to have started. Entry into `torch.npu.make_graphed_callables` is the capture-launch boundary: any exception after that point poisons the whole runner and never triggers eager replay, even in non-strict mode. Parameter object, storage, version, and bitwise value are snapshotted before launch; capture-time mutation is restored where safely possible and then fails closed. Buffer, gradient, runtime-memory, mixed training-mode, CPU/NPU RNG, and module-structure cleanup failures likewise poison the runner. Replay failure after launch also poisons the runner. No post-launch validation re-queries an Ascend physical format.
 
 CPU tests use a static-buffer replay test double to check changed-input copying, nested PyTree reconstruction, aliases, and poisoning. This does not replace a physical CANN/torch-npu graph canary. No arbitrary dynamic-shape graph claim is made.
 

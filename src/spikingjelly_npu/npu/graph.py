@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import copy
 import enum
+import importlib
 import struct
-import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +33,10 @@ class GraphPreExecutionError(RuntimeError):
         super().__init__(route.reason)
 
 
+class _PhysicalFormatInspectionError(RuntimeError):
+    """Ascend physical format could not be inspected before graph execution."""
+
+
 @dataclass(frozen=True)
 class _TensorSignature:
     shape: tuple[int, ...]
@@ -44,6 +48,7 @@ class _TensorSignature:
     storage_offset: int | None
     is_contiguous: bool | None
     contiguous_memory_formats: tuple[str, ...]
+    physical_device_format: int | None
 
 
 @dataclass(frozen=True)
@@ -237,6 +242,41 @@ def _tensor_memory_signature(
     return stride, storage_offset, is_contiguous, tuple(formats)
 
 
+def _physical_device_format(tensor: torch.Tensor) -> int | None:
+    """Return the Ascend physical format without changing CPU import safety.
+
+    NPUGraph captures are physical-layout specific. Logical shape, stride, and
+    PyTorch memory-format metadata do not distinguish base ND tensors from
+    internal formats such as FRACTAL_NZ or NCDHW, so NPU signatures must include
+    the runtime-reported format before bucket selection.
+    """
+
+    if tensor.device.type != "npu":
+        return None
+    try:
+        torch_npu = importlib.import_module("torch_npu")
+    except (ImportError, OSError) as error:
+        raise _PhysicalFormatInspectionError(
+            "cannot import torch-npu to inspect the Ascend physical format required "
+            f"for exact NPUGraph matching: {error}"
+        ) from error
+    get_format = getattr(torch_npu, "get_npu_format", None)
+    if not callable(get_format):
+        npu_ops = getattr(torch.ops, "npu", None)
+        get_format = None if npu_ops is None else getattr(npu_ops, "get_npu_format", None)
+    if not callable(get_format):
+        raise _PhysicalFormatInspectionError(
+            "torch-npu does not expose get_npu_format for exact NPUGraph matching"
+        )
+    try:
+        return int(get_format(tensor))
+    except Exception as error:
+        raise _PhysicalFormatInspectionError(
+            "failed to inspect the Ascend physical format required for exact "
+            f"NPUGraph matching: {error}"
+        ) from error
+
+
 def _tensor_signature(tensor: torch.Tensor) -> _TensorSignature:
     stride, storage_offset, is_contiguous, memory_formats = _tensor_memory_signature(
         tensor
@@ -251,6 +291,7 @@ def _tensor_signature(tensor: torch.Tensor) -> _TensorSignature:
         storage_offset=storage_offset,
         is_contiguous=is_contiguous,
         contiguous_memory_formats=memory_formats,
+        physical_device_format=_physical_device_format(tensor),
     )
 
 
@@ -362,6 +403,15 @@ class _GradientSnapshot:
     parameter: nn.Parameter
     gradient: torch.Tensor | None
     value: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class _ParameterSnapshot:
+    name: str
+    parameter: nn.Parameter
+    data_ptr: int | None
+    version: int | None
+    value: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -487,6 +537,93 @@ class _GraphRunnerSafety:
         )
         return modules, parameters, buffers
 
+    def _finalize_module_structure_after_capture(
+        self,
+        signature: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        """Validate capture state without querying physical formats after launch.
+
+        Parameter identity, storage, and version must remain exactly unchanged.
+        Buffers are restored after warmup, so their versions may advance during
+        restoration; only their identity and storage are revalidated before the
+        restored version is recorded. Logical and physical tensor metadata remain
+        the authoritative pre-launch snapshot.
+        """
+
+        if not isinstance(self.model, nn.Module):
+            if signature:
+                raise RuntimeError("non-module graph target gained module structure")
+            return ()
+        if not signature:
+            raise RuntimeError("module graph target lost its structure signature")
+        modules, parameters, buffers = signature
+        current_modules = tuple(
+            (name, id(module), type(module))
+            for name, module in self.model.named_modules(remove_duplicate=False)
+        )
+        if current_modules != modules:
+            raise RuntimeError("model modules changed during NPUGraph capture")
+
+        def finalize_parameters(
+            entries: tuple[Any, ...],
+            current: tuple[tuple[str, torch.Tensor], ...],
+        ) -> tuple[Any, ...]:
+            if len(entries) != len(current):
+                raise RuntimeError("model parameters changed during NPUGraph capture")
+            finalized = []
+            for saved, (current_name, tensor) in zip(entries, current, strict=True):
+                name, identity, data_ptr, version, tensor_signature = saved
+                current_version = self._tensor_version(tensor)
+                if (
+                    current_name != name
+                    or id(tensor) != identity
+                    or self._tensor_data_ptr(tensor) != data_ptr
+                    or current_version != version
+                ):
+                    raise RuntimeError(
+                        f"model parameter {name!r} changed during NPUGraph capture"
+                    )
+                finalized.append(saved)
+            return tuple(finalized)
+
+        def finalize_buffers(
+            entries: tuple[Any, ...],
+            current: tuple[tuple[str, torch.Tensor], ...],
+        ) -> tuple[Any, ...]:
+            if len(entries) != len(current):
+                raise RuntimeError("model buffers changed during NPUGraph capture")
+            finalized = []
+            for saved, (current_name, tensor) in zip(entries, current, strict=True):
+                name, identity, data_ptr, _version, tensor_signature = saved
+                if (
+                    current_name != name
+                    or id(tensor) != identity
+                    or self._tensor_data_ptr(tensor) != data_ptr
+                ):
+                    raise RuntimeError(
+                        f"model buffer {name!r} changed during NPUGraph capture"
+                    )
+                finalized.append(
+                    (
+                        name,
+                        identity,
+                        data_ptr,
+                        self._tensor_version(tensor),
+                        tensor_signature,
+                    )
+                )
+            return tuple(finalized)
+
+        current_parameters = tuple(
+            self.model.named_parameters(remove_duplicate=False)
+        )
+        current_buffers = tuple(self.model.named_buffers(remove_duplicate=False))
+        return (
+            modules,
+            finalize_parameters(parameters, current_parameters),
+            finalize_buffers(buffers, current_buffers),
+        )
+
     def _has_module_hooks(self) -> bool:
         if not isinstance(self.model, nn.Module):
             return False
@@ -557,6 +694,73 @@ class _GraphRunnerSafety:
                 ):
                     raise RuntimeError(f"buffer {item.name!r} changed during NPUGraph capture")
                 target.copy_(item.value)
+
+    @staticmethod
+    def _parameter_value_snapshot(parameter: nn.Parameter) -> torch.Tensor:
+        return parameter.detach().to(device="cpu", copy=True).contiguous()
+
+    @staticmethod
+    def _parameter_values_identical(
+        parameter: nn.Parameter, snapshot: torch.Tensor
+    ) -> bool:
+        current = _GraphRunnerSafety._parameter_value_snapshot(parameter)
+        if current.shape != snapshot.shape or current.dtype != snapshot.dtype:
+            return False
+        current_bytes = current.reshape(-1).view(torch.uint8)
+        snapshot_bytes = snapshot.reshape(-1).view(torch.uint8)
+        return bool(torch.equal(current_bytes, snapshot_bytes))
+
+    def _snapshot_parameters(self) -> tuple[_ParameterSnapshot, ...]:
+        if not isinstance(self.model, nn.Module):
+            return ()
+        return tuple(
+            _ParameterSnapshot(
+                name,
+                parameter,
+                self._tensor_data_ptr(parameter),
+                self._tensor_version(parameter),
+                self._parameter_value_snapshot(parameter),
+            )
+            for name, parameter in self.model.named_parameters(remove_duplicate=False)
+        )
+
+    def _restore_parameters(self, snapshot: tuple[_ParameterSnapshot, ...]) -> None:
+        if not isinstance(self.model, nn.Module):
+            if snapshot:
+                raise RuntimeError("non-module graph target gained parameters")
+            return
+        current = tuple(self.model.named_parameters(remove_duplicate=False))
+        if len(current) != len(snapshot):
+            raise RuntimeError("model parameters changed during NPUGraph capture")
+        changes: list[str] = []
+        for item, (current_name, parameter) in zip(snapshot, current, strict=True):
+            same_object = current_name == item.name and parameter is item.parameter
+            same_storage = self._tensor_data_ptr(parameter) == item.data_ptr
+            same_metadata = (
+                parameter.shape == item.value.shape
+                and parameter.dtype == item.value.dtype
+                and parameter.layout == torch.strided
+            )
+            same_version = self._tensor_version(parameter) == item.version
+            same_value = False
+            if same_object and same_storage and same_metadata:
+                same_value = self._parameter_values_identical(parameter, item.value)
+                if not same_value:
+                    with torch.no_grad():
+                        parameter.copy_(item.value)
+            if not (
+                same_object
+                and same_storage
+                and same_metadata
+                and same_version
+                and same_value
+            ):
+                changes.append(item.name)
+        if changes:
+            joined = ", ".join(repr(name) for name in changes)
+            raise RuntimeError(
+                f"model parameters changed during NPUGraph capture: {joined}"
+            )
 
     def _snapshot_gradients(self) -> tuple[_GradientSnapshot, ...]:
         if not isinstance(self.model, nn.Module):
@@ -699,22 +903,20 @@ class _GraphRunnerSafety:
         # Real capture reaches this helper only after NPU routing has been selected.
         return (tensors[0].device,) if tensors else ()
 
-    def _validate_capture_structure(self, snapshot: tuple[Any, ...]) -> None:
-        if self._module_structure_signature(include_versions=False) != snapshot:
-            raise RuntimeError("model structure changed during NPUGraph capture")
-
     def _make_graphed_callable(
         self,
         wrapper: nn.Module,
         sample_tensors: tuple[torch.Tensor, ...],
         num_warmup_iters: int,
-    ) -> Any:
+        *,
+        structure_snapshot: tuple[Any, ...],
+    ) -> tuple[Any, tuple[Any, ...]]:
         if not hasattr(torch, "npu") or not hasattr(torch.npu, "make_graphed_callables"):
             raise RuntimeError("torch.npu.make_graphed_callables is unavailable")
         if self._has_module_hooks():
             raise RuntimeError("module hooks are incompatible with NPUGraph capture")
 
-        structure_snapshot = self._module_structure_signature(include_versions=False)
+        parameter_snapshot = self._snapshot_parameters()
         training_snapshot = self._snapshot_training_modes()
         buffer_snapshot = self._snapshot_buffers()
         gradient_snapshot = self._snapshot_gradients()
@@ -731,8 +933,17 @@ class _GraphRunnerSafety:
                 sample_tensors,
                 num_warmup_iters=num_warmup_iters,
             )
+        except Exception as error:
+            capture_error: Exception | None = error
+            graphed = None
+        else:
+            capture_error = None
         finally:
             cleanup_steps = (
+                (
+                    "model parameters",
+                    lambda: self._restore_parameters(parameter_snapshot),
+                ),
                 ("model buffers", lambda: self._restore_buffers(buffer_snapshot)),
                 ("parameter gradients", lambda: self._restore_gradients(gradient_snapshot)),
                 (
@@ -756,15 +967,27 @@ class _GraphRunnerSafety:
                 except Exception as error:
                     cleanup_errors.append((f"NPU RNG ({device})", error))
             try:
-                self._validate_capture_structure(structure_snapshot)
+                finalized_structure = self._finalize_module_structure_after_capture(
+                    structure_snapshot
+                )
             except Exception as error:
+                finalized_structure = ()
                 cleanup_errors.append(("model structure", error))
-            if cleanup_errors:
-                failed = ", ".join(name for name, _ in cleanup_errors)
-                raise _CaptureStateError(
-                    f"failed to restore {failed} after NPUGraph capture"
-                ) from cleanup_errors[0][1]
-        return graphed
+        if cleanup_errors:
+            failed = ", ".join(name for name, _ in cleanup_errors)
+            raise _CaptureStateError(
+                f"failed to restore {failed} after NPUGraph capture"
+            ) from cleanup_errors[0][1]
+        if capture_error is not None:
+            raise _CaptureStateError(
+                "NPUGraph capture failed after launch; runner is poisoned and will not "
+                "execute eager fallback"
+            ) from capture_error
+        if graphed is None:
+            raise _CaptureStateError(
+                "NPUGraph capture returned no callable after launch; runner is poisoned"
+            )
+        return graphed, finalized_structure
 
 
 @dataclass
@@ -773,6 +996,14 @@ class _BucketCapture:
     capture_error: str | None = None
     capture_exception: Exception | None = None
     execution_state: tuple[Any, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _StaticCapturePreflight:
+    input_signature: tuple[Any, ...]
+    training_state: tuple[bool, ...]
+    deterministic_state: bool | None
+    structure_signature: tuple[Any, ...]
 
 
 class GraphBucketRunner(_GraphRunnerSafety):
@@ -881,12 +1112,14 @@ class GraphBucketRunner(_GraphRunnerSafety):
         self,
         template: _CallTemplate,
         sample_tensors: tuple[torch.Tensor, ...],
-    ) -> Any:
+        structure_snapshot: tuple[Any, ...],
+    ) -> tuple[Any, tuple[Any, ...]]:
         wrapper = _PytreeForwardOnly(self.model, template)
         return self._make_graphed_callable(
             wrapper,
             sample_tensors,
             self.num_warmup_iters,
+            structure_snapshot=structure_snapshot,
         )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -894,6 +1127,9 @@ class GraphBucketRunner(_GraphRunnerSafety):
             raise self._capture_state_error
         try:
             call_signature, tensor_leaves, template = _describe_call(tuple(args), kwargs)
+        except _PhysicalFormatInspectionError as error:
+            self._route_fallback_or_raise(str(error), None)
+            return self.model(*args, **kwargs)
         except (TypeError, ValueError) as error:
             self._unknown_signature(str(error))
             return self.model(*args, **kwargs)
@@ -954,7 +1190,11 @@ class GraphBucketRunner(_GraphRunnerSafety):
             self._route_fallback_or_raise(fallback_reason, expected_batch_size)
             return self.model(*args, **kwargs)
 
-        execution_state = self._execution_state()
+        try:
+            execution_state = self._execution_state()
+        except _PhysicalFormatInspectionError as error:
+            self._route_fallback_or_raise(str(error), expected_batch_size)
+            return self.model(*args, **kwargs)
         if self._tracked_execution_state != execution_state:
             self._captures.clear()
             self._last_capture_error = None
@@ -975,33 +1215,19 @@ class GraphBucketRunner(_GraphRunnerSafety):
 
         if state.graphed is None:
             try:
-                state.graphed = self._capture(template, tensor_leaves)
+                state.graphed, finalized_structure = self._capture(
+                    template,
+                    tensor_leaves,
+                    execution_state[2],
+                )
             except _CaptureStateError as error:
                 self._capture_state_error = error
                 raise
-            except Exception as error:
-                state.capture_error = f"{type(error).__name__}: {error}"
-                state.capture_exception = error
-                self._captures[bucket_index] = state
-                self._last_capture_error = state.capture_error
-                if self.strict:
-                    raise
-                warnings.warn(
-                    "NPUGraph capture failed for bucket "
-                    f"{self._bucket_label(bucket_index)}; using eager mode: "
-                    f"{state.capture_error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                self.last_route = GraphRoute(
-                    "eager",
-                    f"capture failed for bucket {self._bucket_label(bucket_index)}: "
-                    f"{state.capture_error}",
-                    False,
-                    expected_batch_size,
-                )
-                return self.model(*args, **kwargs)
-            state.execution_state = self._execution_state()
+            state.execution_state = (
+                execution_state[0],
+                execution_state[1],
+                finalized_structure,
+            )
             self._tracked_execution_state = state.execution_state
             self._captures[bucket_index] = state
 
@@ -1066,6 +1292,7 @@ class StaticGraphRunner(_GraphRunnerSafety):
         self._captured_deterministic_state: bool | None = None
         self._captured_structure_signature: tuple[Any, ...] | None = None
         self._capture_signature: tuple[Any, ...] | None = None
+        self._pending_capture_preflight: _StaticCapturePreflight | None = None
         self.last_route = GraphRoute("eager", "not called", False, self.batch_size)
 
     @property
@@ -1079,30 +1306,47 @@ class StaticGraphRunner(_GraphRunnerSafety):
         self._captured_deterministic_state = None
         self._captured_structure_signature = None
         self._capture_signature = None
+        self._pending_capture_preflight = None
 
     @staticmethod
     def _input_signature(inputs: torch.Tensor) -> tuple[Any, ...]:
-        # Preserve the legacy StaticGraphRunner signature contract. Exact stride,
-        # storage-offset, memory-format, and alias checks are GraphBucketRunner-only.
+        # Preserve the legacy logical StaticGraphRunner signature contract while
+        # preventing replay across different Ascend physical storage formats.
         return (
             tuple(inputs.shape),
             inputs.dtype,
             inputs.device,
             inputs.requires_grad,
             inputs.layout,
+            _physical_device_format(inputs),
+        )
+
+    def _capture_preflight(self, sample: torch.Tensor) -> _StaticCapturePreflight:
+        return _StaticCapturePreflight(
+            input_signature=self._input_signature(sample),
+            training_state=self._module_training_state(),
+            deterministic_state=self._deterministic_capture_state(),
+            structure_signature=self._module_structure_signature(),
         )
 
     def _capture(self, sample: torch.Tensor) -> nn.Module:
+        # Every decision-capable signature and physical-format query happens before
+        # ``make_graphed_callables``. Post-launch cleanup uses only object/storage/
+        # version checks plus restoration snapshots; it never re-queries format.
+        preflight = self._pending_capture_preflight
+        if preflight is None:
+            preflight = self._capture_preflight(sample)
         wrapper = _ForwardOnly(self.model)
-        graphed = self._make_graphed_callable(
+        graphed, captured_structure_signature = self._make_graphed_callable(
             wrapper,
             (sample,),
             self.num_warmup_iters,
+            structure_snapshot=preflight.structure_signature,
         )
-        self._captured_training_state = self._module_training_state()
-        self._captured_deterministic_state = self._deterministic_capture_state()
-        self._captured_structure_signature = self._module_structure_signature()
-        self._capture_signature = self._input_signature(sample)
+        self._captured_training_state = preflight.training_state
+        self._captured_deterministic_state = preflight.deterministic_state
+        self._captured_structure_signature = captured_structure_signature
+        self._capture_signature = preflight.input_signature
         return graphed
 
     def _route_fallback_or_raise(self, reason: str) -> None:
@@ -1162,45 +1406,40 @@ class StaticGraphRunner(_GraphRunnerSafety):
                 "module hooks are incompatible with NPUGraph"
             )
             return self.model(inputs)
-        execution_state_changed = self._graphed is not None and (
-            self._captured_training_state != self._module_training_state()
-            or self._captured_deterministic_state != self._deterministic_capture_state()
-            or self._captured_structure_signature != self._module_structure_signature()
-        )
-        if execution_state_changed:
-            self.reset_capture()
-        elif self._capture_error is not None:
+        if self._capture_error is not None:
             self._route_fallback_or_raise(
                 f"prior capture failed: {self._capture_error}"
             )
             return self.model(inputs)
-        if self._graphed is not None and self._capture_signature != self._input_signature(inputs):
+        try:
+            preflight = self._capture_preflight(inputs)
+        except _PhysicalFormatInspectionError as error:
+            self._route_fallback_or_raise(str(error))
+            return self.model(inputs)
+        execution_state_changed = self._graphed is not None and (
+            self._captured_training_state != preflight.training_state
+            or self._captured_deterministic_state != preflight.deterministic_state
+            or self._captured_structure_signature != preflight.structure_signature
+        )
+        if execution_state_changed:
+            self.reset_capture()
+        elif (
+            self._graphed is not None
+            and self._capture_signature != preflight.input_signature
+        ):
             self._route_fallback_or_raise(
                 "input signature does not match static capture"
             )
             return self.model(inputs)
         if self._graphed is None:
+            self._pending_capture_preflight = preflight
             try:
                 self._graphed = self._capture(inputs)
             except _CaptureStateError as error:
                 self._capture_state_error = error
                 raise
-            except Exception as error:
-                self._capture_error = f"{type(error).__name__}: {error}"
-                if self.strict:
-                    raise
-                warnings.warn(
-                    f"NPUGraph capture failed; using eager mode: {self._capture_error}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                self.last_route = GraphRoute(
-                    "eager",
-                    f"capture failed: {self._capture_error}",
-                    False,
-                    self.batch_size,
-                )
-                return self.model(inputs)
+            finally:
+                self._pending_capture_preflight = None
         self.last_route = GraphRoute(
             "npugraph", "static full-batch replay", True, self.batch_size
         )
