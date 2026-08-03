@@ -30,6 +30,10 @@ class _TensorSignature:
     device: torch.device
     layout: torch.layout
     requires_grad: bool
+    stride: tuple[int, ...] | None
+    storage_offset: int | None
+    is_contiguous: bool | None
+    contiguous_memory_formats: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class _StaticSignature:
 class _CallSignature:
     tree_spec: Any
     leaves: tuple[_TensorSignature | _StaticSignature, ...]
+    tensor_storage_groups: tuple[int, ...]
 
     @property
     def tensor_count(self) -> int:
@@ -197,6 +202,87 @@ def _canonical_call_tree(
     return tuple(args), ordered_kwargs
 
 
+def _tensor_memory_signature(
+    tensor: torch.Tensor,
+) -> tuple[tuple[int, ...] | None, int | None, bool | None, tuple[str, ...]]:
+    try:
+        stride = tuple(int(value) for value in tensor.stride())
+        storage_offset = int(tensor.storage_offset())
+        is_contiguous = bool(tensor.is_contiguous())
+    except (NotImplementedError, RuntimeError):
+        return None, None, None, ()
+
+    formats: list[str] = []
+    for name, memory_format, expected_rank in (
+        ("contiguous", torch.contiguous_format, None),
+        ("channels_last", torch.channels_last, 4),
+        ("channels_last_3d", torch.channels_last_3d, 5),
+    ):
+        if expected_rank is not None and tensor.dim() != expected_rank:
+            continue
+        try:
+            if tensor.is_contiguous(memory_format=memory_format):
+                formats.append(name)
+        except (NotImplementedError, RuntimeError):
+            continue
+    return stride, storage_offset, is_contiguous, tuple(formats)
+
+
+def _tensor_signature(tensor: torch.Tensor) -> _TensorSignature:
+    stride, storage_offset, is_contiguous, memory_formats = _tensor_memory_signature(
+        tensor
+    )
+    return _TensorSignature(
+        shape=tuple(int(dimension) for dimension in tensor.shape),
+        dtype=tensor.dtype,
+        device=tensor.device,
+        layout=tensor.layout,
+        requires_grad=bool(tensor.requires_grad),
+        stride=stride,
+        storage_offset=storage_offset,
+        is_contiguous=is_contiguous,
+        contiguous_memory_formats=memory_formats,
+    )
+
+
+def _tensors_share_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
+    is_alias_of = getattr(torch._C, "_is_alias_of", None)
+    if is_alias_of is not None:
+        try:
+            return bool(is_alias_of(left, right))
+        except (NotImplementedError, RuntimeError):
+            pass
+    try:
+        left_storage = left.untyped_storage()
+        right_storage = right.untyped_storage()
+    except (NotImplementedError, RuntimeError):
+        return left is right
+    left_identity = getattr(left_storage, "_cdata", None)
+    right_identity = getattr(right_storage, "_cdata", None)
+    if left_identity is not None and right_identity is not None:
+        return bool(left_identity == right_identity)
+    return left_storage is right_storage
+
+
+def _tensor_storage_groups(tensors: tuple[torch.Tensor, ...]) -> tuple[int, ...]:
+    representatives: list[torch.Tensor] = []
+    groups: list[int] = []
+    for tensor in tensors:
+        group = next(
+            (
+                index
+                for index, representative in enumerate(representatives)
+                if _tensors_share_storage(tensor, representative)
+            ),
+            None,
+        )
+        if group is None:
+            group = len(representatives)
+            representatives.append(tensor)
+        groups.append(group)
+    return tuple(groups)
+
+
 def _describe_call(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> tuple[_CallSignature, tuple[torch.Tensor, ...], _CallTemplate]:
@@ -207,24 +293,21 @@ def _describe_call(
     tensor_positions: list[int] = []
     for position, leaf in enumerate(leaves):
         if isinstance(leaf, torch.Tensor):
-            signatures.append(
-                _TensorSignature(
-                    tuple(int(dimension) for dimension in leaf.shape),
-                    leaf.dtype,
-                    leaf.device,
-                    leaf.layout,
-                    bool(leaf.requires_grad),
-                )
-            )
+            signatures.append(_tensor_signature(leaf))
             tensors.append(leaf)
             template_leaves.append(_TENSOR_SLOT)
             tensor_positions.append(position)
         else:
             signatures.append(_StaticSignature(_freeze_static_value(leaf)))
             template_leaves.append(leaf)
+    tensor_tuple = tuple(tensors)
     return (
-        _CallSignature(tree_spec, tuple(signatures)),
-        tuple(tensors),
+        _CallSignature(
+            tree_spec,
+            tuple(signatures),
+            _tensor_storage_groups(tensor_tuple),
+        ),
+        tensor_tuple,
         _CallTemplate(tree_spec, tuple(template_leaves), tuple(tensor_positions)),
     )
 
@@ -354,10 +437,19 @@ class _GraphRunnerSafety:
     def _tensor_data_ptr(tensor: torch.Tensor) -> int | None:
         try:
             return int(tensor.data_ptr())
-        except RuntimeError:
+        except (NotImplementedError, RuntimeError):
             return None
 
-    def _module_structure_signature(self) -> tuple[Any, ...]:
+    @staticmethod
+    def _tensor_version(tensor: torch.Tensor) -> int | None:
+        try:
+            return int(tensor._version)
+        except (NotImplementedError, RuntimeError):
+            return None
+
+    def _module_structure_signature(
+        self, *, include_versions: bool = True
+    ) -> tuple[Any, ...]:
         if not isinstance(self.model, nn.Module):
             return ()
         modules = tuple(
@@ -369,11 +461,8 @@ class _GraphRunnerSafety:
                 name,
                 id(parameter),
                 self._tensor_data_ptr(parameter),
-                tuple(parameter.shape),
-                parameter.dtype,
-                parameter.device,
-                parameter.requires_grad,
-                parameter.layout,
+                self._tensor_version(parameter) if include_versions else None,
+                _tensor_signature(parameter),
             )
             for name, parameter in self.model.named_parameters(remove_duplicate=False)
         )
@@ -382,11 +471,8 @@ class _GraphRunnerSafety:
                 name,
                 id(buffer),
                 self._tensor_data_ptr(buffer),
-                tuple(buffer.shape),
-                buffer.dtype,
-                buffer.device,
-                buffer.requires_grad,
-                buffer.layout,
+                self._tensor_version(buffer) if include_versions else None,
+                _tensor_signature(buffer),
             )
             for name, buffer in self.model.named_buffers(remove_duplicate=False)
         )
@@ -605,7 +691,7 @@ class _GraphRunnerSafety:
         return (tensors[0].device,) if tensors else ()
 
     def _validate_capture_structure(self, snapshot: tuple[Any, ...]) -> None:
-        if self._module_structure_signature() != snapshot:
+        if self._module_structure_signature(include_versions=False) != snapshot:
             raise RuntimeError("model structure changed during NPUGraph capture")
 
     def _make_graphed_callable(
@@ -619,7 +705,7 @@ class _GraphRunnerSafety:
         if self._has_module_hooks():
             raise RuntimeError("module hooks are incompatible with NPUGraph capture")
 
-        structure_snapshot = self._module_structure_signature()
+        structure_snapshot = self._module_structure_signature(include_versions=False)
         training_snapshot = self._snapshot_training_modes()
         buffer_snapshot = self._snapshot_buffers()
         gradient_snapshot = self._snapshot_gradients()
@@ -677,7 +763,7 @@ class _BucketCapture:
     graphed: Any | None = None
     capture_error: str | None = None
     capture_exception: Exception | None = None
-    deterministic_state: bool | None = None
+    execution_state: tuple[Any, ...] | None = None
 
 
 class GraphBucketRunner(_GraphRunnerSafety):
@@ -726,9 +812,12 @@ class GraphBucketRunner(_GraphRunnerSafety):
         self.require_deterministic_training = bool(require_deterministic_training)
         self.allow_unsafe_rng_training = bool(allow_unsafe_rng_training)
         self.assume_graph_safe = bool(assume_graph_safe)
-        self._captures: dict[tuple[int, tuple[bool, ...]], _BucketCapture] = {}
+        # Each declared bucket owns at most one current capture or failed-attempt
+        # record. Execution-state changes replace that slot rather than growing a
+        # cache keyed by every train/eval combination.
+        self._captures: dict[int, _BucketCapture] = {}
         self._capture_state_error: _CaptureStateError | None = None
-        self._tracked_structure_signature = self._module_structure_signature()
+        self._tracked_execution_state: tuple[Any, ...] | None = None
         self._last_capture_error: str | None = None
         self.last_route = GraphRoute("eager", "not called", False, None)
 
@@ -738,35 +827,46 @@ class GraphBucketRunner(_GraphRunnerSafety):
 
     @property
     def capture_errors(self) -> tuple[tuple[int, tuple[bool, ...], str], ...]:
-        return tuple(
-            (bucket_index, training_state, state.capture_error)
-            for (bucket_index, training_state), state in self._captures.items()
-            if state.capture_error is not None
-        )
+        errors: list[tuple[int, tuple[bool, ...], str]] = []
+        for bucket_index, state in self._captures.items():
+            if state.capture_error is None:
+                continue
+            training_state: tuple[bool, ...] = ()
+            if state.execution_state is not None:
+                training_state = state.execution_state[0]
+            errors.append((bucket_index, training_state, state.capture_error))
+        return tuple(errors)
 
     def reset_capture(self) -> None:
         self._captures.clear()
+        self._tracked_execution_state = None
         self._last_capture_error = None
-        self._tracked_structure_signature = self._module_structure_signature()
 
-    def _refresh_structure_identity(self) -> None:
-        current = self._module_structure_signature()
-        if current != self._tracked_structure_signature:
-            self._captures.clear()
-            self._last_capture_error = None
-            self._tracked_structure_signature = current
+    def _execution_state(self) -> tuple[Any, ...]:
+        return (
+            self._module_training_state(),
+            self._deterministic_capture_state(),
+            self._module_structure_signature(),
+        )
 
     def _bucket_label(self, index: int) -> str:
         name = self.buckets[index].name
         return f"{name!r}" if name is not None else str(index)
 
+    def _route_fallback_or_raise(
+        self,
+        reason: str,
+        expected_batch_size: int | None,
+    ) -> None:
+        self.last_route = GraphRoute("eager", reason, False, expected_batch_size)
+        if self.strict:
+            raise RuntimeError(reason)
+
     def _unknown_signature(self, detail: str | None = None) -> None:
         reason = "call signature is not in the exact graph bucket allowlist"
         if detail is not None:
             reason = f"{reason}: {detail}"
-        self.last_route = GraphRoute("eager", reason, False, None)
-        if self.strict:
-            raise RuntimeError(reason)
+        self._route_fallback_or_raise(reason, None)
 
     def _capture(
         self,
@@ -803,85 +903,65 @@ class GraphBucketRunner(_GraphRunnerSafety):
 
         bucket = self.buckets[bucket_index]
         expected_batch_size = bucket.expected_batch_size
+        fallback_reason: str | None = None
         if self._execution_device_type(tensor_leaves) != "npu":
-            self.last_route = GraphRoute(
-                "eager", "model is not on an NPU", False, expected_batch_size
-            )
-            return self.model(*args, **kwargs)
-        if not self._declares_graph_safe():
-            self.last_route = GraphRoute(
-                "eager",
+            fallback_reason = "model is not on an NPU"
+        elif not self._declares_graph_safe():
+            fallback_reason = (
                 "model does not declare graph-safe per-forward state; "
-                "set assume_graph_safe=True only after qualification",
-                False,
-                expected_batch_size,
+                "set assume_graph_safe=True only after qualification"
             )
+        else:
+            training_capture = self._training_capture_requested()
+            if training_capture and not self.allow_training:
+                fallback_reason = (
+                    "training NPUGraph requires explicit allow_training=True "
+                    "after parity qualification"
+                )
+            elif (
+                training_capture
+                and self.require_deterministic_training
+                and not self._deterministic_algorithms_enabled()
+            ):
+                fallback_reason = (
+                    "training NPUGraph requires "
+                    "torch.use_deterministic_algorithms(True, warn_only=False); "
+                    "set require_deterministic_training=False only after independent "
+                    "parity qualification"
+                )
+            else:
+                rng_reason = (
+                    self._rng_sensitive_training_reason() if training_capture else None
+                )
+                if rng_reason is not None and not self.allow_unsafe_rng_training:
+                    fallback_reason = (
+                        f"RNG-sensitive training capture rejected: {rng_reason}; set "
+                        "allow_unsafe_rng_training=True only for an independently "
+                        "qualified unsafe path"
+                    )
+                elif self._has_module_hooks():
+                    fallback_reason = "module hooks are incompatible with NPUGraph"
+        if fallback_reason is not None:
+            self._route_fallback_or_raise(fallback_reason, expected_batch_size)
             return self.model(*args, **kwargs)
 
-        training_capture = self._training_capture_requested()
-        if training_capture and not self.allow_training:
-            self.last_route = GraphRoute(
-                "eager",
-                "training NPUGraph requires explicit allow_training=True "
-                "after parity qualification",
-                False,
-                expected_batch_size,
-            )
-            return self.model(*args, **kwargs)
-        if (
-            training_capture
-            and self.require_deterministic_training
-            and not self._deterministic_algorithms_enabled()
-        ):
-            self.last_route = GraphRoute(
-                "eager",
-                "training NPUGraph requires "
-                "torch.use_deterministic_algorithms(True, warn_only=False); "
-                "set require_deterministic_training=False only after independent parity "
-                "qualification",
-                False,
-                expected_batch_size,
-            )
-            return self.model(*args, **kwargs)
-        rng_reason = self._rng_sensitive_training_reason() if training_capture else None
-        if rng_reason is not None and not self.allow_unsafe_rng_training:
-            self.last_route = GraphRoute(
-                "eager",
-                f"RNG-sensitive training capture rejected: {rng_reason}; set "
-                "allow_unsafe_rng_training=True only for an independently qualified "
-                "unsafe path",
-                False,
-                expected_batch_size,
-            )
-            return self.model(*args, **kwargs)
-        if self._has_module_hooks():
-            self.last_route = GraphRoute(
-                "eager",
-                "module hooks are incompatible with NPUGraph",
-                False,
-                expected_batch_size,
-            )
-            return self.model(*args, **kwargs)
-
-        self._refresh_structure_identity()
-        training_state = self._module_training_state()
-        identity = (bucket_index, training_state)
-        deterministic_state = self._deterministic_capture_state()
-        state = self._captures.get(identity)
-        if state is not None and state.deterministic_state != deterministic_state:
-            del self._captures[identity]
-            state = None
+        execution_state = self._execution_state()
+        if self._tracked_execution_state != execution_state:
+            self._captures.clear()
+            self._last_capture_error = None
+            self._tracked_execution_state = execution_state
+        state = self._captures.get(bucket_index)
         if state is None:
-            state = _BucketCapture(deterministic_state=deterministic_state)
+            state = _BucketCapture(execution_state=execution_state)
         if state.capture_error is not None:
             self._last_capture_error = state.capture_error
             reason = (
                 f"prior capture failed for bucket {self._bucket_label(bucket_index)}: "
                 f"{state.capture_error}"
             )
+            self.last_route = GraphRoute("eager", reason, False, expected_batch_size)
             if self.strict:
                 raise RuntimeError(reason) from state.capture_exception
-            self.last_route = GraphRoute("eager", reason, False, expected_batch_size)
             return self.model(*args, **kwargs)
 
         if state.graphed is None:
@@ -893,7 +973,7 @@ class GraphBucketRunner(_GraphRunnerSafety):
             except Exception as error:
                 state.capture_error = f"{type(error).__name__}: {error}"
                 state.capture_exception = error
-                self._captures[identity] = state
+                self._captures[bucket_index] = state
                 self._last_capture_error = state.capture_error
                 if self.strict:
                     raise
@@ -912,8 +992,9 @@ class GraphBucketRunner(_GraphRunnerSafety):
                     expected_batch_size,
                 )
                 return self.model(*args, **kwargs)
-            self._captures[identity] = state
-            self._tracked_structure_signature = self._module_structure_signature()
+            state.execution_state = self._execution_state()
+            self._tracked_execution_state = state.execution_state
+            self._captures[bucket_index] = state
 
         self._last_capture_error = None
         self.last_route = GraphRoute(
@@ -922,7 +1003,15 @@ class GraphBucketRunner(_GraphRunnerSafety):
             True,
             expected_batch_size,
         )
-        return state.graphed(*tensor_leaves)
+        try:
+            return state.graphed(*tensor_leaves)
+        except Exception as error:
+            poisoned = _CaptureStateError(
+                "NPUGraph replay failed after launch; runner is poisoned and will not "
+                "execute eager fallback"
+            )
+            self._capture_state_error = poisoned
+            raise poisoned from error
 
 
 class StaticGraphRunner(_GraphRunnerSafety):
@@ -981,6 +1070,8 @@ class StaticGraphRunner(_GraphRunnerSafety):
 
     @staticmethod
     def _input_signature(inputs: torch.Tensor) -> tuple[Any, ...]:
+        # Preserve the legacy StaticGraphRunner signature contract. Exact stride,
+        # storage-offset, memory-format, and alias checks are GraphBucketRunner-only.
         return (
             tuple(inputs.shape),
             inputs.dtype,
@@ -1126,7 +1217,15 @@ class StaticGraphRunner(_GraphRunnerSafety):
         self.last_route = GraphRoute(
             "npugraph", "static full-batch replay", True, self.batch_size
         )
-        return self._graphed(inputs)
+        try:
+            return self._graphed(inputs)
+        except Exception as error:
+            poisoned = _CaptureStateError(
+                "NPUGraph replay failed after launch; runner is poisoned and will not "
+                "execute eager fallback"
+            )
+            self._capture_state_error = poisoned
+            raise poisoned from error
 
 
 __all__ = [

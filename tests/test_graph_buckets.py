@@ -5,6 +5,12 @@ import torch
 from torch import nn
 
 from spikingjelly_npu.activation_based import base
+from spikingjelly_npu.npu import (
+    GraphBucketRunner as ExportedGraphBucketRunner,
+)
+from spikingjelly_npu.npu import (
+    GraphBucketSpec as ExportedGraphBucketSpec,
+)
 from spikingjelly_npu.npu.graph import (
     GraphBucketRunner,
     GraphBucketSpec,
@@ -167,25 +173,28 @@ def test_max_bucket_validation_and_duplicate_rejection():
         GraphBucketRunner(nn.Identity(), [specs[0], specs[0]])
 
 
-def test_train_eval_identity_is_separate(monkeypatch):
+def test_train_eval_change_replaces_one_bounded_bucket_capture(monkeypatch):
     model = LinearModel().eval()
     sample = torch.zeros(2, 3)
     runner = GraphBucketRunner(
         model,
         [GraphBucketSpec((sample,))],
+        max_buckets=1,
         allow_training=True,
         require_deterministic_training=False,
     )
     fake_npu = FakeNPU()
     enable_fake_npu(monkeypatch, runner, fake_npu)
 
-    runner(sample)
-    model.train()
-    runner(sample)
-    model.eval()
-    runner(sample)
+    for _ in range(3):
+        runner(sample)
+        assert len(runner._captures) == 1
+        model.train()
+        runner(sample)
+        assert len(runner._captures) == 1
+        model.eval()
 
-    assert len(fake_npu.capture_calls) == 2
+    assert len(fake_npu.capture_calls) == 6
     assert runner.last_route.backend == "npugraph"
 
 
@@ -217,6 +226,119 @@ def test_exact_signature_checks_dtype_layout_and_requires_grad(monkeypatch):
     assert len(fake_npu.capture_calls) == 1
 
 
+def test_exact_signature_checks_stride_storage_offset_and_memory_format(monkeypatch):
+    class SingleInputModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def forward(self, inputs):
+            return inputs.clone()
+
+    base = torch.arange(48, dtype=torch.float32).reshape(4, 12)
+    sample = base[:, 1:7]
+    runner = GraphBucketRunner(SingleInputModel().eval(), [GraphBucketSpec((sample,))])
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    matching = torch.arange(48, dtype=torch.float32).reshape(4, 12)[:, 1:7]
+    runner(matching)
+    assert runner.last_route.backend == "npugraph"
+
+    mismatches = (
+        matching.clone(),
+        torch.arange(52, dtype=torch.float32).reshape(4, 13)[:, 1:7],
+        torch.zeros(4, 6).t().contiguous().t(),
+    )
+    for mismatch in mismatches:
+        output = runner(mismatch)
+        assert_same(output, mismatch)
+        assert runner.last_route.backend == "eager"
+        assert "allowlist" in runner.last_route.reason
+
+    contiguous_4d = torch.zeros(2, 3, 4, 5)
+    channels_last = contiguous_4d.contiguous(memory_format=torch.channels_last)
+    format_runner = GraphBucketRunner(
+        SingleInputModel().eval(),
+        [GraphBucketSpec((channels_last,))],
+    )
+    format_fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, format_runner, format_fake_npu)
+    output = format_runner(contiguous_4d)
+    assert_same(output, contiguous_4d)
+    assert format_runner.last_route.backend == "eager"
+    assert format_fake_npu.capture_calls == []
+
+
+def test_exact_signature_supports_empty_storage_groups(monkeypatch):
+    model = RecurrentMaskModel().eval()
+    first = torch.empty(0, 3)
+    second = torch.empty(0, 3)
+    mask = torch.empty(0, 3, dtype=torch.bool)
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((first, (second, second)), {"mask": mask})],
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    replay_first = torch.empty(0, 3)
+    replay_second = torch.empty(0, 3)
+    replay_mask = torch.empty(0, 3, dtype=torch.bool)
+    output = runner(
+        replay_first,
+        (replay_second, replay_second),
+        mask=replay_mask,
+    )
+
+    assert output.shape == (0, 3)
+    assert runner.last_route.backend == "npugraph"
+    assert len(fake_npu.capture_calls) == 1
+
+
+def test_exact_signature_encodes_alias_and_view_relationships(monkeypatch):
+    class AliasModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def forward(self, inputs, state, *, mask):
+            return inputs + state + mask
+
+    storage = torch.arange(64, dtype=torch.float32).reshape(4, 16)
+    inputs = storage[:, :4]
+    state = storage[:, 4:8]
+    mask = storage[:, 8:12]
+    runner = GraphBucketRunner(
+        AliasModel().eval(),
+        [GraphBucketSpec((inputs, state), {"mask": mask})],
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    replay_storage = torch.arange(64, dtype=torch.float32).reshape(4, 16)
+    runner(
+        replay_storage[:, :4],
+        replay_storage[:, 4:8],
+        mask=replay_storage[:, 8:12],
+    )
+    assert runner.last_route.backend == "npugraph"
+
+    independent_inputs = replay_storage[:, :4].clone()
+    independent_state = replay_storage[:, 4:8].clone()
+    independent_mask = replay_storage[:, 8:12].clone()
+    eager = runner(independent_inputs, independent_state, mask=independent_mask)
+    assert_same(eager, independent_inputs + independent_state + independent_mask)
+    assert runner.last_route.backend == "eager"
+    assert "allowlist" in runner.last_route.reason
+
+    partially_aliased_storage = torch.arange(64, dtype=torch.float32).reshape(4, 16)
+    eager = runner(
+        partially_aliased_storage[:, :4],
+        partially_aliased_storage[:, 4:8],
+        mask=partially_aliased_storage[:, 8:12].clone(),
+    )
+    assert eager.shape == (4, 4)
+    assert runner.last_route.backend == "eager"
+    assert len(fake_npu.capture_calls) == 1
+
+
 def test_parameter_replacement_invalidates_all_bucket_captures(monkeypatch):
     model = LinearModel().eval()
     runner = GraphBucketRunner(
@@ -235,9 +357,111 @@ def test_parameter_replacement_invalidates_all_bucket_captures(monkeypatch):
 
     model.linear.weight = nn.Parameter(model.linear.weight.detach().clone())
     runner(torch.randn(2, 3))
-    runner(torch.randn(4, 3))
+    assert len(fake_npu.capture_calls) == 3
+    assert set(runner._captures) == {0}
 
+    runner(torch.randn(4, 3))
     assert len(fake_npu.capture_calls) == 4
+    assert set(runner._captures) == {0, 1}
+
+
+def test_parameter_and_buffer_version_changes_recapture_current_bucket(monkeypatch):
+    class VersionedModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(3))
+            self.register_buffer("bias", torch.zeros(3))
+
+        def forward(self, inputs):
+            return inputs * self.weight + self.bias
+
+    model = VersionedModel().eval()
+    sample = torch.zeros(2, 3)
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((sample,))],
+        max_buckets=1,
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(sample)
+    with torch.no_grad():
+        model.weight.add_(1)
+    runner(sample)
+    model.bias.add_(2)
+    runner(sample)
+
+    assert len(fake_npu.capture_calls) == 3
+    assert len(runner._captures) == 1
+
+
+def test_parameter_version_change_invalidates_every_bucket_immediately(monkeypatch):
+    model = LinearModel().eval()
+    runner = GraphBucketRunner(
+        model,
+        [
+            GraphBucketSpec((torch.zeros(2, 3),)),
+            GraphBucketSpec((torch.zeros(4, 3),)),
+        ],
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    runner(torch.zeros(2, 3))
+    runner(torch.zeros(4, 3))
+    assert set(runner._captures) == {0, 1}
+
+    with torch.no_grad():
+        model.linear.weight.add_(1)
+    runner(torch.zeros(2, 3))
+
+    assert len(fake_npu.capture_calls) == 3
+    assert set(runner._captures) == {0}
+
+
+def test_total_capture_slots_stay_bounded_across_subtree_training_modes(monkeypatch):
+    class MixedModeModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def __init__(self):
+            super().__init__()
+            self.left = nn.Identity()
+            self.right = nn.Identity()
+
+        def forward(self, inputs):
+            return self.right(self.left(inputs))
+
+    model = MixedModeModel().eval()
+    runner = GraphBucketRunner(
+        model,
+        [
+            GraphBucketSpec((torch.zeros(2, 3),)),
+            GraphBucketSpec((torch.zeros(4, 3),)),
+        ],
+        max_buckets=2,
+        allow_training=True,
+        require_deterministic_training=False,
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    for left_training, right_training in (
+        (False, False),
+        (True, False),
+        (False, True),
+        (True, True),
+        (False, False),
+    ):
+        model.left.train(left_training)
+        model.right.train(right_training)
+        runner(torch.zeros(2, 3))
+        runner(torch.zeros(4, 3))
+        assert len(runner._captures) <= runner.max_buckets == 2
+
+    assert set(runner._captures) == {0, 1}
 
 
 def test_hooks_force_eager_without_capture(monkeypatch):
@@ -254,6 +478,76 @@ def test_hooks_force_eager_without_capture(monkeypatch):
     assert output.shape == (2, 2)
     assert runner.last_route.backend == "eager"
     assert "hooks" in runner.last_route.reason
+    assert fake_npu.capture_calls == []
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("cpu", "model is not on an NPU"),
+        ("graph_unsafe", "graph-safe"),
+        ("training_disabled", "allow_training=True"),
+        ("nondeterministic", "use_deterministic_algorithms"),
+        ("rng_sensitive", "RNG-sensitive"),
+    ],
+)
+def test_strict_known_fallbacks_raise_before_capture_or_eager(
+    monkeypatch, case, reason
+):
+    class StrictModel(LinearModel):
+        def __init__(self):
+            super().__init__()
+            self.dropout = nn.Identity()
+
+        def forward(self, inputs):
+            self.calls += 1
+            return self.dropout(self.linear(inputs))
+
+    model = StrictModel().eval()
+    if case == "graph_unsafe":
+        model._spikingjelly_npu_graph_safe = False
+    if case in {"training_disabled", "nondeterministic", "rng_sensitive"}:
+        model.train()
+    if case == "rng_sensitive":
+        model.dropout = nn.Dropout(p=0.5)
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((torch.zeros(2, 3),))],
+        strict=True,
+        allow_training=case in {"nondeterministic", "rng_sensitive"},
+        require_deterministic_training=case == "nondeterministic",
+    )
+    fake_npu = FakeNPU()
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+    if case != "cpu":
+        monkeypatch.setattr(runner, "_execution_device_type", lambda tensors: "npu")
+    if case == "nondeterministic":
+        monkeypatch.setattr(runner, "_deterministic_algorithms_enabled", lambda: False)
+
+    with pytest.raises(RuntimeError, match=reason):
+        runner(torch.zeros(2, 3))
+
+    assert model.calls == 0
+    assert fake_npu.capture_calls == []
+
+
+def test_strict_hooks_raise_before_capture_or_eager(monkeypatch):
+    model = LinearModel().eval()
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((torch.zeros(2, 3),))],
+        strict=True,
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+    handle = model.linear.register_forward_hook(lambda module, args, output: output)
+    try:
+        with pytest.raises(RuntimeError, match="hooks"):
+            runner(torch.zeros(2, 3))
+    finally:
+        handle.remove()
+
+    assert model.calls == 0
     assert fake_npu.capture_calls == []
 
 
@@ -316,6 +610,33 @@ def test_fatal_cleanup_failure_poisons_entire_runner(monkeypatch):
     for inputs in (torch.randn(4, 3), torch.randn(7, 3)):
         with pytest.raises(_CaptureStateError, match="model buffers"):
             runner(inputs)
+
+    assert model.calls == calls_after_failure
+    assert len(fake_npu.capture_calls) == 1
+
+
+def test_replay_launch_failure_never_runs_eager_and_poisons_runner(monkeypatch):
+    model = LinearModel().eval()
+    sample = torch.zeros(2, 3)
+
+    def capture(wrapper, sample_args, num_warmup_iters):
+        def fail_replay(*tensor_args):
+            raise RuntimeError("launch failed")
+
+        return fail_replay
+
+    runner = GraphBucketRunner(model, [GraphBucketSpec((sample,))])
+    fake_npu = FakeNPU(capture)
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    with pytest.raises(_CaptureStateError, match="replay failed") as error_info:
+        runner(sample)
+    assert "launch failed" in str(error_info.value.__cause__)
+    calls_after_failure = model.calls
+
+    for later in (sample, torch.zeros(3, 3)):
+        with pytest.raises(_CaptureStateError, match="replay failed"):
+            runner(later)
 
     assert model.calls == calls_after_failure
     assert len(fake_npu.capture_calls) == 1
@@ -475,6 +796,11 @@ def test_dropout_training_rejected_unless_explicitly_unsafe(monkeypatch):
     unsafe_runner(sample)
     assert unsafe_runner.last_route.backend == "npugraph"
     assert len(unsafe_fake_npu.capture_calls) == 1
+
+
+def test_graph_bucket_public_exports():
+    assert ExportedGraphBucketRunner is GraphBucketRunner
+    assert ExportedGraphBucketSpec is GraphBucketSpec
 
 
 def test_static_graph_runner_facade_compatibility(monkeypatch):
