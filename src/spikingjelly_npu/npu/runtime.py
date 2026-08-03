@@ -70,12 +70,16 @@ def configure_npu(
     *,
     allow_internal_format: bool | None = False,
     jit_compile: bool | None = False,
+    allow_conv_hf32: bool | None = None,
 ) -> torch.device:
-    """Import torch-npu, select a device, and configure graph-friendly operators.
+    """Import torch-npu, select a device, and configure explicit runtime policy.
 
     ``jit_compile=False`` selects binary ACLNN/opapi operators in torch-npu 2.9,
     while ``allow_internal_format=False`` prevents legacy internal-format ACLop
     kernels that cannot enter NPUGraph capture. The latter may be write-only.
+
+    ``allow_conv_hf32`` controls the process-global torch-npu Conv HF32 policy
+    only when explicitly set. ``None`` preserves the runtime's existing policy.
     """
     _import_torch_npu()
     if not hasattr(torch, "npu") or not torch.npu.is_available():
@@ -92,4 +96,22 @@ def configure_npu(
             # hasattr(config, "allow_internal_format") is always false.
             config.allow_internal_format = bool(allow_internal_format)
     torch.npu.set_device(resolved)
+    if allow_conv_hf32 is not None:
+        conv = getattr(torch.npu, "conv", None)
+        requested_conv_hf32 = bool(allow_conv_hf32)
+        try:
+            if conv is None:
+                raise AttributeError("torch.npu.conv is unavailable")
+            conv.allow_hf32 = requested_conv_hf32
+            configured_conv_hf32 = bool(conv.allow_hf32)
+        except (AttributeError, RuntimeError, TypeError) as error:
+            raise RuntimeError(
+                "torch.npu.conv.allow_hf32 is unavailable; cannot apply the "
+                "requested Conv HF32 policy"
+            ) from error
+        if configured_conv_hf32 != requested_conv_hf32:
+            raise RuntimeError(
+                "torch.npu.conv.allow_hf32 did not retain the requested Conv "
+                f"HF32 policy {requested_conv_hf32!r}"
+            )
     return resolved
