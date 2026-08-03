@@ -160,6 +160,65 @@ def test_aspy_lif_cpu_fallback_matches_torch_forward_state_and_gradient(decay_in
     assert "requires an NPU tensor" in aspy_node.last_backend_route.reason
 
 
+@pytest.mark.parametrize(
+    ("threshold", "reset", "alpha", "match"),
+    [
+        (float("nan"), 0.0, 2.0, "finite v_threshold"),
+        (1.0, float("inf"), 2.0, "finite v_reset"),
+        (1.0, 0.0, 0.0, "finite positive ATan alpha"),
+        (1.0, 0.0, float("nan"), "finite positive ATan alpha"),
+    ],
+)
+def test_aspy_common_scalar_validation_is_explicit(threshold, reset, alpha, match):
+    reason = _aspy._unsupported_scalar_reason(
+        surrogate.ATan(alpha=alpha),
+        v_threshold=threshold,
+        v_reset=reset,
+    )
+
+    assert reason is not None
+    assert match in reason
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "match"),
+    [
+        ("lif", float("inf"), "finite fixed float tau greater than 1"),
+        ("klif", float("nan"), "finite fixed float tau greater than 1"),
+    ],
+)
+def test_aspy_invalid_tau_rejects_before_extension_loading(
+    monkeypatch, kind, value, match
+):
+    load_calls = []
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: load_calls.append(True))
+    common = {
+        "x_seq": torch.zeros(2, 1, 1),
+        "v_init": torch.zeros(1, 1),
+        "v_threshold": 1.0,
+        "v_reset": 0.0,
+        "detach_reset": False,
+        "surrogate_function": surrogate.ATan(),
+        "store_v_seq": False,
+        "tau": value,
+        "decay_input": True,
+        "strict": True,
+    }
+
+    with pytest.raises(_aspy.AsPyBackendError, match=match):
+        if kind == "lif":
+            _aspy.try_lif_multi_step(**common)
+        else:
+            _aspy.try_klif_multi_step(
+                **common,
+                k=torch.ones(1),
+                scale_reset=False,
+            )
+
+    assert load_calls == []
+
+
 def test_aspy_lif_strict_mode_rejects_cpu_before_extension_loading(monkeypatch):
     load_calls = []
     monkeypatch.setattr(_aspy, "_load_extension", lambda: load_calls.append(True))
@@ -289,7 +348,7 @@ def test_aspy_commits_validated_extension_result(monkeypatch):
     spike_seq = torch.ones_like(x)
     v_seq = torch.full_like(x, 0.25)
     v_final = v_seq[-1].clone()
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -310,8 +369,56 @@ def test_aspy_commits_validated_extension_result(monkeypatch):
     assert isinstance(node.last_backend_route, _aspy.AsPyRoute)
     assert node.last_backend_route.backend == "aspy"
     assert node.last_backend_route.reason_code == "aspy.if.native"
+    assert node.last_backend_route.native_region == "if"
     assert node.last_backend_route.native_launch_attempted
     assert node.last_backend_route.accelerated
+
+
+def test_declared_compact_capability_is_observable_in_route_metadata(monkeypatch):
+    node = neuron.IFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=False,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(2, 1, 1)
+    spike_seq = torch.ones_like(x)
+    module = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: {
+            "schema_version": 1,
+            "capabilities": {
+                "if": ["if_forward", "if_backward"],
+                "if_compact": [
+                    "if_forward_compact",
+                    "if_backward_compact",
+                ],
+            },
+            "symbols": [
+                "if_forward",
+                "if_backward",
+                "if_forward_compact",
+                "if_backward_compact",
+            ],
+        },
+        if_forward=lambda *args: None,
+        if_backward=lambda *args: None,
+        if_forward_compact=lambda *args: None,
+        if_backward_compact=lambda *args: None,
+        if_multi_step=lambda *args: (spike_seq, torch.zeros_like(x[0]), None),
+    )
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (module, _aspy._adapter_capabilities(module)),
+    )
+
+    assert node(x) is spike_seq
+    assert node.last_backend_route.reason_code == "aspy.if_compact.native"
+    assert node.last_backend_route.native_region == "if_compact"
+    assert node.last_backend_route.abi_version == 1
+    assert node.last_backend_route.schema_version == 1
 
 
 def test_cupy_alias_is_preserved_in_native_route_metadata(monkeypatch):
@@ -322,7 +429,7 @@ def test_cupy_alias_is_preserved_in_native_route_metadata(monkeypatch):
     )
     x = torch.zeros(2, 1, 1)
     spike_seq = torch.ones_like(x)
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -362,7 +469,7 @@ def test_declared_partial_bundle_is_not_reinferred_from_adapter_methods(monkeypa
         surrogate_function=surrogate.ATan(),
     )
     x = torch.zeros(2, 1, 1)
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -384,7 +491,7 @@ def test_aspy_unloadable_bundle_route_is_not_reported_absent(monkeypatch):
         surrogate_function=surrogate.ATan(),
     )
     x = torch.zeros(2, 1, 1)
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -413,7 +520,7 @@ def test_aspy_lif_commits_validated_extension_result(monkeypatch):
     v_seq = torch.full_like(x, 0.25)
     v_final = v_seq[-1].clone()
     calls = []
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -444,7 +551,7 @@ def test_aspy_malformed_extension_result_does_not_commit_state(monkeypatch):
         surrogate_function=surrogate.ATan(),
     )
     x = torch.zeros(3, 2, 4)
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -467,6 +574,92 @@ def test_aspy_malformed_extension_result_does_not_commit_state(monkeypatch):
     assert node.v_seq is None
 
 
+@pytest.mark.parametrize("malformed_name", ["spike_seq", "v_final", "v_seq"])
+def test_aspy_malformed_result_layout_does_not_commit_state(
+    monkeypatch, malformed_name
+):
+    node = neuron.IFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(3, 2, 4)
+    outputs = {
+        "spike_seq": torch.ones_like(x),
+        "v_final": torch.ones_like(x[0]),
+        "v_seq": torch.ones_like(x),
+    }
+    if malformed_name == "v_final":
+        outputs[malformed_name] = torch.ones(2, 8)[:, ::2]
+    else:
+        outputs[malformed_name] = torch.ones(3, 2, 8)[:, :, ::2]
+    assert outputs[malformed_name].shape == (
+        x[0].shape if malformed_name == "v_final" else x.shape
+    )
+    assert not outputs[malformed_name].is_contiguous()
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                if_multi_step=lambda *args: (
+                    outputs["spike_seq"],
+                    outputs["v_final"],
+                    outputs["v_seq"],
+                )
+            ),
+            None,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="contiguous with storage offset zero"):
+        node(x)
+
+    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v_seq is None
+
+
+def test_aspy_malformed_result_physical_format_does_not_commit_state(monkeypatch):
+    node = neuron.IFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(3, 2, 4)
+    spike_seq = torch.ones_like(x)
+    v_final = torch.ones_like(x[0])
+    v_seq = torch.ones_like(x)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_require_npu_nd",
+        lambda tensor: (
+            "AsPy native bridge requires physical ACL_FORMAT_ND (2), got format=29"
+            if tensor is v_final
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                if_multi_step=lambda *args: (spike_seq, v_final, v_seq)
+            ),
+            None,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="v_final is not bridge-safe"):
+        node(x)
+
+    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v_seq is None
+
+
 def test_aspy_lif_malformed_extension_result_does_not_commit_state(monkeypatch):
     node = neuron.LIFNode(
         backend="aspy",
@@ -475,7 +668,7 @@ def test_aspy_lif_malformed_extension_result_does_not_commit_state(monkeypatch):
         surrogate_function=surrogate.ATan(),
     )
     x = torch.zeros(3, 2, 4)
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -718,7 +911,7 @@ def test_aspy_klif_cpu_fallback_strict_and_single_step(monkeypatch):
 
 
 def test_aspy_klif_old_bundle_falls_back_or_strictly_errors(monkeypatch):
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -754,7 +947,7 @@ def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
     v_seq = torch.full_like(x, 0.25)
     v_final = v_seq[-1].clone()
     calls = []
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -830,7 +1023,7 @@ def test_aspy_plif_commits_only_validated_transactional_state(monkeypatch):
     v_seq = torch.full_like(x, 0.25)
     v_final = v_seq[-1].clone()
     calls = []
-    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         _aspy,
         "_load_extension",

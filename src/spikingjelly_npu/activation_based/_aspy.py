@@ -139,7 +139,9 @@ _DEFAULT_EXTENSION = "spikingjelly_npu_aspy"
 
 _LOGICAL_OPERATIONS = {
     "if": "activation_based.neuron.if.multi_step",
+    "if_compact": "activation_based.neuron.if.multi_step",
     "lif": "activation_based.neuron.lif.multi_step",
+    "lif_compact": "activation_based.neuron.lif.multi_step",
     "plif": "activation_based.neuron.plif.multi_step",
     "klif": "activation_based.neuron.klif.multi_step",
     "fedsnn_decay_lif": "fedsnn.decay_lif",
@@ -147,7 +149,9 @@ _LOGICAL_OPERATIONS = {
 
 _NATIVE_REASONS = {
     "if": "Ascend C fused multi-step IF kernel",
+    "if_compact": "Ascend C compact multi-step IF kernel without public voltage sequence",
     "lif": "Ascend C fused multi-step LIF kernel",
+    "lif_compact": "Ascend C compact multi-step LIF kernel without public voltage sequence",
     "plif": "Ascend C fused multi-step PLIF kernel",
     "klif": "Ascend C fused multi-step KLIF kernel",
     "fedsnn_decay_lif": "Ascend C fused multi-step FedSNN decay-LIF kernel",
@@ -290,10 +294,35 @@ def _fallback_or_reject(
     )
 
 
+def _unsupported_scalar_reason(
+    surrogate_function: surrogate.SurrogateFunctionBase,
+    *,
+    v_threshold: float,
+    v_reset: float | None,
+) -> str | None:
+    if not isinstance(surrogate_function, surrogate.ATan):
+        return "AsPy currently supports only the ATan surrogate"
+    if not surrogate_function.spiking:
+        return "AsPy requires the surrogate to be in spiking mode"
+    if not math.isfinite(v_threshold):
+        return "AsPy requires a finite v_threshold"
+    if v_reset is not None and not math.isfinite(v_reset):
+        return "AsPy requires a finite v_reset"
+    if (
+        not math.isfinite(surrogate_function.alpha)
+        or surrogate_function.alpha <= 0.0
+    ):
+        return "AsPy requires finite positive ATan alpha"
+    return None
+
+
 def _unsupported_reason(
     x_seq: torch.Tensor,
     v_init: torch.Tensor,
     surrogate_function: surrogate.SurrogateFunctionBase,
+    *,
+    v_threshold: float,
+    v_reset: float | None,
 ) -> str | None:
     if x_seq.device.type != "npu":
         return f"AsPy requires an NPU tensor, got device={x_seq.device.type}"
@@ -316,11 +345,11 @@ def _unsupported_reason(
         format_reason = _require_npu_nd(tensor)
         if format_reason is not None:
             return f"AsPy {name} is not bridge-safe: {format_reason}"
-    if not isinstance(surrogate_function, surrogate.ATan):
-        return "AsPy currently supports only the ATan surrogate"
-    if not surrogate_function.spiking:
-        return "AsPy requires the surrogate to be in spiking mode"
-    return None
+    return _unsupported_scalar_reason(
+        surrogate_function,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+    )
 
 
 def _unsupported_stateless_reason(
@@ -580,6 +609,25 @@ def _validate_result(result: AsPyIFResult, request: _AsPyIFRequest) -> None:
                 f"AsPy {name} must match input device and dtype; "
                 f"got device={tensor.device}, dtype={tensor.dtype}"
             )
+        if not tensor.is_contiguous() or tensor.storage_offset() != 0:
+            raise ValueError(
+                f"AsPy {name} must be contiguous with storage offset zero"
+            )
+        format_reason = _require_npu_nd(tensor)
+        if format_reason is not None:
+            raise ValueError(f"AsPy {name} is not bridge-safe: {format_reason}")
+
+
+def _executed_neuron_capability(
+    capability: str,
+    *,
+    store_v_seq: bool,
+    capabilities: AsPyCapabilities,
+) -> str:
+    compact = f"{capability}_compact"
+    if not store_v_seq and capabilities.supports(compact):
+        return compact
+    return capability
 
 
 def try_if_multi_step(
@@ -597,7 +645,13 @@ def try_if_multi_step(
 ) -> tuple[AsPyIFResult | None, AsPyRoute]:
     """Run fused IF when qualified, otherwise return a pre-execution fallback."""
 
-    reason = _unsupported_reason(x_seq, v_init, surrogate_function)
+    reason = _unsupported_reason(
+        x_seq,
+        v_init,
+        surrogate_function,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+    )
     if reason is not None:
         return _fallback_or_reject(
             "if",
@@ -643,7 +697,9 @@ def try_if_multi_step(
     result = _normalize_result(raw_result, store_v_seq)
     _validate_result(result, request)
     return result, native_route(
-        "if",
+        _executed_neuron_capability(
+            "if", store_v_seq=store_v_seq, capabilities=capabilities
+        ),
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
@@ -668,9 +724,17 @@ def try_lif_multi_step(
 ) -> tuple[AsPyIFResult | None, AsPyRoute]:
     """Run fused fixed-tau LIF or return an observable pre-execution fallback."""
 
-    reason = _unsupported_reason(x_seq, v_init, surrogate_function)
-    if reason is None and (not isinstance(tau, float) or tau <= 1.0):
-        reason = "AsPy LIF requires fixed float tau greater than 1"
+    reason = _unsupported_reason(
+        x_seq,
+        v_init,
+        surrogate_function,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+    )
+    if reason is None and (
+        not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0
+    ):
+        reason = "AsPy LIF requires finite fixed float tau greater than 1"
     if reason is not None:
         return _fallback_or_reject(
             "lif",
@@ -720,7 +784,9 @@ def try_lif_multi_step(
     result = _normalize_result(raw_result, store_v_seq)
     _validate_result(result, request)
     return result, native_route(
-        "lif",
+        _executed_neuron_capability(
+            "lif", store_v_seq=store_v_seq, capabilities=capabilities
+        ),
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
@@ -745,7 +811,13 @@ def try_plif_multi_step(
 ) -> tuple[AsPyIFResult | None, AsPyRoute]:
     """Run fused learnable-tau PLIF with a dynamic device scalar input."""
 
-    reason = _unsupported_reason(x_seq, v_init, surrogate_function)
+    reason = _unsupported_reason(
+        x_seq,
+        v_init,
+        surrogate_function,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+    )
     if reason is None and (
         reciprocal_tau.device != x_seq.device
         or reciprocal_tau.dtype != torch.float32
@@ -837,9 +909,17 @@ def try_klif_multi_step(
 ) -> tuple[AsPyIFResult | None, AsPyRoute]:
     """Run fused KLIF with a dynamic scalar ``k`` or pre-execution fallback."""
 
-    reason = _unsupported_reason(x_seq, v_init, surrogate_function)
-    if reason is None and (not isinstance(tau, float) or tau <= 1.0):
-        reason = "AsPy KLIF requires fixed float tau greater than 1"
+    reason = _unsupported_reason(
+        x_seq,
+        v_init,
+        surrogate_function,
+        v_threshold=v_threshold,
+        v_reset=v_reset,
+    )
+    if reason is None and (
+        not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0
+    ):
+        reason = "AsPy KLIF requires finite fixed float tau greater than 1"
     if reason is None and (
         k.device != x_seq.device
         or k.dtype != torch.float32

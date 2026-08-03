@@ -1,4 +1,4 @@
-# Deterministic multi-operator replacement for msopgen's single-op skeleton.
+# Generated from native/aspy/operator_manifest.json by scripts/build_aspy.py.
 if ("${CMAKE_BUILD_TYPE}x" STREQUAL "Debugx")
     add_ops_compile_options(ALL OPTIONS -g -O0 --cce-ignore-always-inline=true)
 endif()
@@ -7,8 +7,12 @@ add_kernel_compile(AsPyFedSNNDecayLifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_f
 add_kernel_compile(AsPyFedSNNDecayLifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_fed_snn_decay_lif_backward.cpp)
 add_kernel_compile(AsPyIfForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_forward.cpp)
 add_kernel_compile(AsPyIfBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_backward.cpp)
+add_kernel_compile(AsPyIfCompactForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_compact_forward.cpp)
+add_kernel_compile(AsPyIfCompactBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_if_compact_backward.cpp)
 add_kernel_compile(AsPyLifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_forward.cpp)
 add_kernel_compile(AsPyLifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_backward.cpp)
+add_kernel_compile(AsPyLifCompactForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_compact_forward.cpp)
+add_kernel_compile(AsPyLifCompactBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_lif_compact_backward.cpp)
 add_kernel_compile(AsPyKlifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_klif_forward.cpp)
 add_kernel_compile(AsPyKlifBackward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_klif_backward.cpp)
 add_kernel_compile(AsPyPlifForward ${CMAKE_CURRENT_SOURCE_DIR}/as_py_plif_forward.cpp)

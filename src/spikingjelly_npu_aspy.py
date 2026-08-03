@@ -12,14 +12,32 @@ import math
 import torch
 
 from spikingjelly_npu._native import load_aspy_native
+from spikingjelly_npu.routing import probe_aspy_capabilities
 
 _native = load_aspy_native()
 aspy_abi_version = getattr(_native, "aspy_abi_version", None)
 aspy_capabilities = getattr(_native, "aspy_capabilities", None)
+_native_capabilities = probe_aspy_capabilities(_native)
 if_backward = _native.if_backward
 if_forward = _native.if_forward
+if_backward_compact = getattr(_native, "if_backward_compact", None)
+if_forward_compact = getattr(_native, "if_forward_compact", None)
+supports_if_compact = (
+    _native_capabilities.available
+    and _native_capabilities.supports("if_compact")
+    and callable(if_forward_compact)
+    and callable(if_backward_compact)
+)
 lif_backward = _native.lif_backward
 lif_forward = _native.lif_forward
+lif_backward_compact = getattr(_native, "lif_backward_compact", None)
+lif_forward_compact = getattr(_native, "lif_forward_compact", None)
+supports_lif_compact = (
+    _native_capabilities.available
+    and _native_capabilities.supports("lif_compact")
+    and callable(lif_forward_compact)
+    and callable(lif_backward_compact)
+)
 plif_backward = _native.plif_backward
 plif_forward = _native.plif_forward
 klif_backward = getattr(_native, "klif_backward", None)
@@ -134,6 +152,73 @@ class _AsPyIF(torch.autograd.Function):
         return grad_x_seq, grad_v_init, None, None, None, None, None
 
 
+class _AsPyIFCompact(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x_seq: torch.Tensor,
+        v_init: torch.Tensor,
+        v_threshold: float,
+        v_reset: float,
+        hard_reset: bool,
+        detach_reset: bool,
+        surrogate_alpha: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
+        assert if_forward_compact is not None
+        spike_seq, v_final, h_seq = if_forward_compact(
+            x_seq,
+            v_init,
+            v_threshold,
+            v_reset,
+            hard_reset,
+        )
+        ctx.save_for_backward(h_seq, spike_seq)
+        ctx.v_threshold = v_threshold
+        ctx.v_reset = v_reset
+        ctx.hard_reset = hard_reset
+        ctx.detach_reset = detach_reset
+        ctx.surrogate_alpha = surrogate_alpha
+        return spike_seq, v_final
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_spike_seq: torch.Tensor | None,
+        grad_v_final: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
+        if torch.is_grad_enabled():
+            raise RuntimeError("AsPy compact IF supports first-order gradients only")
+        h_seq, spike_seq = ctx.saved_tensors
+        if grad_spike_seq is None:
+            grad_spike_seq = torch.zeros_like(spike_seq)
+        else:
+            grad_spike_seq = grad_spike_seq.contiguous()
+        if grad_v_final is None:
+            grad_v_final = torch.zeros_like(h_seq[0])
+        else:
+            grad_v_final = grad_v_final.contiguous()
+
+        h_seq = _require_nd(h_seq, "h_seq")
+        spike_seq = _require_nd(spike_seq, "spike_seq")
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        grad_v_final = _require_nd(grad_v_final, "grad_v_final")
+        assert if_backward_compact is not None
+        grad_x_seq, grad_v_init = if_backward_compact(
+            h_seq,
+            spike_seq,
+            grad_spike_seq,
+            grad_v_final,
+            ctx.v_threshold,
+            ctx.v_reset,
+            ctx.hard_reset,
+            ctx.detach_reset,
+            ctx.surrogate_alpha,
+        )
+        return grad_x_seq, grad_v_init, None, None, None, None, None
+
+
 class _AsPyLIF(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -202,6 +287,81 @@ class _AsPyLIF(torch.autograd.Function):
             spike_seq,
             grad_spike_seq,
             grad_v_seq,
+            grad_v_final,
+            ctx.v_threshold,
+            ctx.v_reset,
+            ctx.hard_reset,
+            ctx.detach_reset,
+            ctx.surrogate_alpha,
+            ctx.tau,
+            ctx.decay_input,
+        )
+        return grad_x_seq, grad_v_init, None, None, None, None, None, None, None
+
+
+class _AsPyLIFCompact(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x_seq: torch.Tensor,
+        v_init: torch.Tensor,
+        v_threshold: float,
+        v_reset: float,
+        hard_reset: bool,
+        detach_reset: bool,
+        surrogate_alpha: float,
+        tau: float,
+        decay_input: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x_seq = _require_nd(x_seq, "x_seq")
+        v_init = _require_nd(v_init, "v_init")
+        assert lif_forward_compact is not None
+        spike_seq, v_final, h_seq = lif_forward_compact(
+            x_seq,
+            v_init,
+            v_threshold,
+            v_reset,
+            hard_reset,
+            tau,
+            decay_input,
+        )
+        ctx.save_for_backward(h_seq, spike_seq)
+        ctx.v_threshold = v_threshold
+        ctx.v_reset = v_reset
+        ctx.hard_reset = hard_reset
+        ctx.detach_reset = detach_reset
+        ctx.surrogate_alpha = surrogate_alpha
+        ctx.tau = tau
+        ctx.decay_input = decay_input
+        return spike_seq, v_final
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_spike_seq: torch.Tensor | None,
+        grad_v_final: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
+        if torch.is_grad_enabled():
+            raise RuntimeError("AsPy compact LIF supports first-order gradients only")
+        h_seq, spike_seq = ctx.saved_tensors
+        if grad_spike_seq is None:
+            grad_spike_seq = torch.zeros_like(spike_seq)
+        else:
+            grad_spike_seq = grad_spike_seq.contiguous()
+        if grad_v_final is None:
+            grad_v_final = torch.zeros_like(h_seq[0])
+        else:
+            grad_v_final = grad_v_final.contiguous()
+
+        h_seq = _require_nd(h_seq, "h_seq")
+        spike_seq = _require_nd(spike_seq, "spike_seq")
+        grad_spike_seq = _require_nd(grad_spike_seq, "grad_spike_seq")
+        grad_v_final = _require_nd(grad_v_final, "grad_v_final")
+        assert lif_backward_compact is not None
+        grad_x_seq, grad_v_init = lif_backward_compact(
+            h_seq,
+            spike_seq,
+            grad_spike_seq,
             grad_v_final,
             ctx.v_threshold,
             ctx.v_reset,
@@ -496,19 +656,32 @@ def if_multi_step(
         )
         v_native = torch.cat((v_native, v_native.new_zeros(padding)), dim=0)
 
-    spike_native, v_final_native, v_seq_native = _AsPyIF.apply(
-        x_native,
-        v_native,
-        v_threshold,
-        reset,
-        hard_reset,
-        detach_reset,
-        surrogate_alpha,
-    )
+    if not store_v_seq and supports_if_compact:
+        spike_native, v_final_native = _AsPyIFCompact.apply(
+            x_native,
+            v_native,
+            v_threshold,
+            reset,
+            hard_reset,
+            detach_reset,
+            surrogate_alpha,
+        )
+        v_seq_native = None
+    else:
+        spike_native, v_final_native, v_seq_native = _AsPyIF.apply(
+            x_native,
+            v_native,
+            v_threshold,
+            reset,
+            hard_reset,
+            detach_reset,
+            surrogate_alpha,
+        )
     spike_seq = spike_native[:, :neuron_count].reshape_as(x_seq).contiguous()
     v_final = v_final_native[:neuron_count].reshape_as(v_init).contiguous()
     if not store_v_seq:
         return spike_seq, v_final, None
+    assert v_seq_native is not None
     v_seq = v_seq_native[:, :neuron_count].reshape_as(x_seq).contiguous()
     return spike_seq, v_final, v_seq
 
@@ -529,8 +702,8 @@ def lif_multi_step(
 
     if surrogate_name != "atan":
         raise ValueError(f"unsupported AsPy surrogate: {surrogate_name!r}")
-    if not isinstance(tau, float) or tau <= 1.0:
-        raise ValueError("tau must be a float greater than 1")
+    if not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0:
+        raise ValueError("tau must be a finite float greater than 1")
     hard_reset = v_reset is not None
     reset = 0.0 if v_reset is None else v_reset
     time_steps = x_seq.shape[0]
@@ -546,21 +719,36 @@ def lif_multi_step(
         )
         v_native = torch.cat((v_native, v_native.new_full((padding,), reset)), dim=0)
 
-    spike_native, v_final_native, v_seq_native = _AsPyLIF.apply(
-        x_native,
-        v_native,
-        v_threshold,
-        reset,
-        hard_reset,
-        detach_reset,
-        surrogate_alpha,
-        tau,
-        decay_input,
-    )
+    if not store_v_seq and supports_lif_compact:
+        spike_native, v_final_native = _AsPyLIFCompact.apply(
+            x_native,
+            v_native,
+            v_threshold,
+            reset,
+            hard_reset,
+            detach_reset,
+            surrogate_alpha,
+            tau,
+            decay_input,
+        )
+        v_seq_native = None
+    else:
+        spike_native, v_final_native, v_seq_native = _AsPyLIF.apply(
+            x_native,
+            v_native,
+            v_threshold,
+            reset,
+            hard_reset,
+            detach_reset,
+            surrogate_alpha,
+            tau,
+            decay_input,
+        )
     spike_seq = spike_native[:, :neuron_count].reshape_as(x_seq).contiguous()
     v_final = v_final_native[:neuron_count].reshape_as(v_init).contiguous()
     if not store_v_seq:
         return spike_seq, v_final, None
+    assert v_seq_native is not None
     v_seq = v_seq_native[:, :neuron_count].reshape_as(x_seq).contiguous()
     return spike_seq, v_final, v_seq
 
@@ -639,8 +827,8 @@ def klif_multi_step(
         raise RuntimeError("loaded AsPy native extension lacks KLIF symbols")
     if k.numel() != 1:
         raise ValueError("k must contain exactly one value")
-    if not isinstance(tau, float) or tau <= 1.0:
-        raise ValueError("tau must be a float greater than 1")
+    if not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0:
+        raise ValueError("tau must be a finite float greater than 1")
     hard_reset = v_reset is not None
     reset = 0.0 if v_reset is None else v_reset
     time_steps = x_seq.shape[0]

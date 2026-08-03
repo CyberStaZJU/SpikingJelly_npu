@@ -55,6 +55,32 @@
       ]
     },
     {
+      "definition": "native/aspy/definition/aspy_if_compact_forward.json",
+      "name": "if_compact",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_if_compact_forward.cpp",
+            "native/aspy/op_host/as_py_if_compact_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_if_compact_forward.cpp",
+          "op": "AsPyIfCompactForward",
+          "symbol": "if_forward_compact"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_if_compact_backward.cpp",
+            "native/aspy/op_host/as_py_if_compact_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_if_compact_backward.cpp",
+          "op": "AsPyIfCompactBackward",
+          "symbol": "if_backward_compact"
+        }
+      ]
+    },
+    {
       "definition": "native/aspy/definition/aspy_lif_forward.json",
       "name": "lif",
       "operators": [
@@ -77,6 +103,32 @@
           "kernel_source": "native/aspy/op_kernel/as_py_lif_backward.cpp",
           "op": "AsPyLifBackward",
           "symbol": "lif_backward"
+        }
+      ]
+    },
+    {
+      "definition": "native/aspy/definition/aspy_lif_compact_forward.json",
+      "name": "lif_compact",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_lif_compact_forward.cpp",
+            "native/aspy/op_host/as_py_lif_compact_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_lif_compact_forward.cpp",
+          "op": "AsPyLifCompactForward",
+          "symbol": "lif_forward_compact"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_lif_compact_backward.cpp",
+            "native/aspy/op_host/as_py_lif_compact_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_lif_compact_backward.cpp",
+          "op": "AsPyLifCompactBackward",
+          "symbol": "lif_backward_compact"
         }
       ]
     },

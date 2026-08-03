@@ -302,7 +302,11 @@ def test_aspy_native_bridge_rejects_internal_format_for_all_generic_exports():
 
     forward_calls = [
         lambda: native.if_forward(internal, voltage, 1.0, 0.0, True),
+        lambda: native.if_forward_compact(internal, voltage, 1.0, 0.0, True),
         lambda: native.lif_forward(internal, voltage, 1.0, 0.0, True, 2.0, False),
+        lambda: native.lif_forward_compact(
+            internal, voltage, 1.0, 0.0, True, 2.0, False
+        ),
         lambda: native.plif_forward(
             internal, voltage, scalar, 1.0, 0.0, True, False
         ),
@@ -312,8 +316,16 @@ def test_aspy_native_bridge_rejects_internal_format_for_all_generic_exports():
             sequence, sequence, internal, sequence, voltage,
             1.0, 0.0, True, False, 2.0,
         ),
+        lambda: native.if_backward_compact(
+            sequence, sequence, internal, voltage,
+            1.0, 0.0, True, False, 2.0,
+        ),
         lambda: native.lif_backward(
             sequence, sequence, internal, sequence, voltage,
+            1.0, 0.0, True, False, 2.0, 2.0, False,
+        ),
+        lambda: native.lif_backward_compact(
+            sequence, sequence, internal, voltage,
             1.0, 0.0, True, False, 2.0, 2.0, False,
         ),
         lambda: native.plif_backward(

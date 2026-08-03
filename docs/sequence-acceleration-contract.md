@@ -146,15 +146,18 @@ CPU tests use a static-buffer replay test double to check changed-input copying,
 
 ## Compact IF/LIF capability boundary
 
-The planned compact IF/LIF ABI is an additive capability for `store_v_seq=False`:
+The compact IF/LIF ABI is integrated as two additive ABI-1 capability groups, `if_compact` and `lif_compact`, for `store_v_seq=False`:
 
-- public forward returns spikes and final voltage while retaining only the private history required by first-order backward;
-- backward omits a public full `grad_v_seq` input/output path;
+- public forward returns spikes and final voltage while retaining only the private `h_seq` history required by first-order backward;
+- backward omits the public full `grad_v_seq` input path while preserving input and initial-voltage gradients;
 - compact execution is selected only when the complete forward/backward capability pair is declared by a valid versioned bundle, or inferred as a complete pair from an unversioned transitional bundle;
-- partial, malformed, unsupported-version, or undeclared compact symbols are rejected before launch and the legacy full-output ABI remains available when complete;
-- compact launch/backward failure is fatal and must not retry legacy or eager execution.
+- valid versioned metadata is authoritative: undeclared raw compact symbols are ignored;
+- partial, missing/non-callable, malformed, or unsupported-version compact capabilities fail closed before launch, while a complete legacy full-output IF/LIF pair remains usable;
+- `store_v_seq=True` always uses the full-output ABI;
+- compact launch or backward failure is fatal and must not retry legacy or eager execution;
+- route metadata exposes the executed native region as `if_compact` or `lif_compact`.
 
-The compact ABI is not physically qualified until it builds on CANN 8.5 and passes the native tests and performance gates. Existing legacy IF/LIF bundles remain compatible.
+CPU and fake-native integration, manifest generation, packaging coverage, padding/cropping, and first-order failure semantics are implemented. The compact ABI is not physically qualified until it compiles on CANN 8.5 and passes physical NPU correctness, memory, and performance gates. Existing full-output IF/LIF bundles remain compatible.
 
 ## Unsupported or deferred in this alpha
 

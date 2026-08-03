@@ -168,6 +168,66 @@ def test_old_bundle_capabilities_are_inferred_from_complete_symbol_pairs():
         capabilities.groups.append("mutated")
 
 
+def test_unversioned_complete_compact_pairs_are_inferred_independently():
+    capabilities = probe_aspy_capabilities(
+        SimpleNamespace(
+            if_forward=_callable,
+            if_backward=_callable,
+            if_forward_compact=_callable,
+            if_backward_compact=_callable,
+            lif_forward_compact=_callable,
+            lif_backward_compact=_callable,
+        )
+    )
+
+    assert capabilities.legacy
+    assert capabilities.capabilities == ("if", "if_compact", "lif_compact")
+    assert capabilities.supports("if_compact")
+    assert capabilities.supports("lif_compact")
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        SimpleNamespace(if_forward_compact=_callable),
+        SimpleNamespace(if_backward_compact=_callable),
+        SimpleNamespace(
+            lif_forward_compact=_callable,
+            lif_backward_compact=None,
+        ),
+    ],
+)
+def test_unversioned_partial_compact_pairs_never_form_capabilities(module):
+    capabilities = probe_aspy_capabilities(module)
+
+    assert capabilities.legacy
+    assert not capabilities.available
+    assert not capabilities.supports("if_compact")
+    assert not capabilities.supports("lif_compact")
+
+
+def test_versioned_metadata_ignores_undeclared_raw_compact_symbols():
+    module = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: {
+            "schema_version": 1,
+            "capabilities": {"if": ["if_forward", "if_backward"]},
+            "symbols": ["if_forward", "if_backward"],
+        },
+        if_forward=_callable,
+        if_backward=_callable,
+        if_forward_compact=_callable,
+        if_backward_compact=_callable,
+    )
+
+    capabilities = probe_aspy_capabilities(module)
+
+    assert capabilities.source == "declared"
+    assert capabilities.capabilities == ("if",)
+    assert not capabilities.supports("if_compact")
+    assert not capabilities.has_symbol("if_forward_compact")
+
+
 def test_versioned_capability_metadata_is_validated():
     symbols = {
         "if_forward": _callable,
@@ -223,6 +283,21 @@ def test_versioned_capability_metadata_is_validated():
                 "symbols": ["if_forward", "if_backward"],
             },
             if_forward=_callable,
+        ),
+        SimpleNamespace(
+            aspy_abi_version=lambda: 1,
+            aspy_capabilities=lambda: {
+                "schema_version": 1,
+                "capabilities": {
+                    "if_compact": [
+                        "if_forward_compact",
+                        "if_backward_compact",
+                    ]
+                },
+                "symbols": ["if_forward_compact", "if_backward_compact"],
+            },
+            if_forward_compact=_callable,
+            if_backward_compact=None,
         ),
     ],
 )

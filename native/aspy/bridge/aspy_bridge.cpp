@@ -10,8 +10,12 @@
 #include "aclnn_as_py_fed_snn_decay_lif_backward.h"
 #include "aclnn_as_py_fed_snn_decay_lif_forward.h"
 #include "aclnn_as_py_if_backward.h"
+#include "aclnn_as_py_if_compact_backward.h"
+#include "aclnn_as_py_if_compact_forward.h"
 #include "aclnn_as_py_if_forward.h"
 #include "aclnn_as_py_lif_backward.h"
+#include "aclnn_as_py_lif_compact_backward.h"
+#include "aclnn_as_py_lif_compact_forward.h"
 #include "aclnn_as_py_lif_forward.h"
 #include "aclnn_as_py_klif_backward.h"
 #include "aclnn_as_py_klif_forward.h"
@@ -379,6 +383,155 @@ std::vector<at::Tensor> if_backward(
   return {grad_x_seq, grad_v_init};
 }
 
+std::vector<at::Tensor> if_forward_compact(
+    const at::Tensor& x_seq,
+    const at::Tensor& v_init,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset) {
+  check_sequence(x_seq, "x_seq");
+  check_tensor(v_init, "v_init");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(v_init.device() == x_seq.device(), "v_init must be on the same NPU");
+  TORCH_CHECK(
+      v_init.sizes().equals(x_seq.sizes().slice(1)),
+      "v_init shape mismatch");
+
+  c10_npu::NPUGuard device_guard(x_seq.device());
+  at::Tensor spike_seq = empty_nd_like(x_seq);
+  at::Tensor v_final = empty_nd_like(v_init);
+  at::Tensor h_seq = empty_nd_like(x_seq);
+
+  auto x_acl = std::make_shared<AclTensorHandle>(x_seq);
+  auto v_init_acl = std::make_shared<AclTensorHandle>(v_init);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto v_final_acl = std::make_shared<AclTensorHandle>(v_final);
+  auto h_seq_acl = std::make_shared<AclTensorHandle>(h_seq);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyIfCompactForwardGetWorkspaceSize(
+          x_acl->get(),
+          v_init_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          spike_acl->get(),
+          v_final_acl->get(),
+          h_seq_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyIfCompactForwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null compact IF forward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(x_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(x_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyIfCompactForward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       x_acl,
+       v_init_acl,
+       spike_acl,
+       v_final_acl,
+       h_seq_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyIfCompactForward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {spike_seq, v_final, h_seq};
+}
+
+std::vector<at::Tensor> if_backward_compact(
+    const at::Tensor& h_seq,
+    const at::Tensor& spike_seq,
+    const at::Tensor& grad_spike_seq,
+    const at::Tensor& grad_v_final,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset,
+    bool detach_reset,
+    double surrogate_alpha) {
+  check_sequence(h_seq, "h_seq");
+  check_sequence(spike_seq, "spike_seq");
+  check_sequence(grad_spike_seq, "grad_spike_seq");
+  check_tensor(grad_v_final, "grad_v_final");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(
+      std::isfinite(surrogate_alpha) && surrogate_alpha > 0.0,
+      "surrogate_alpha must be finite and positive");
+  TORCH_CHECK(spike_seq.sizes().equals(h_seq.sizes()), "spike_seq shape mismatch");
+  TORCH_CHECK(
+      grad_spike_seq.sizes().equals(h_seq.sizes()),
+      "grad_spike_seq shape mismatch");
+  TORCH_CHECK(
+      grad_v_final.sizes().equals(h_seq.sizes().slice(1)),
+      "grad_v_final shape mismatch");
+  for (const at::Tensor* tensor : {&spike_seq, &grad_spike_seq, &grad_v_final}) {
+    TORCH_CHECK(tensor->device() == h_seq.device(), "backward tensor device mismatch");
+  }
+
+  c10_npu::NPUGuard device_guard(h_seq.device());
+  at::Tensor grad_x_seq = empty_nd_like(h_seq);
+  at::Tensor grad_v_init = empty_nd_like(grad_v_final);
+
+  auto h_acl = std::make_shared<AclTensorHandle>(h_seq);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto grad_spike_acl = std::make_shared<AclTensorHandle>(grad_spike_seq);
+  auto grad_v_final_acl = std::make_shared<AclTensorHandle>(grad_v_final);
+  auto grad_x_acl = std::make_shared<AclTensorHandle>(grad_x_seq);
+  auto grad_v_init_acl = std::make_shared<AclTensorHandle>(grad_v_init);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyIfCompactBackwardGetWorkspaceSize(
+          h_acl->get(),
+          spike_acl->get(),
+          grad_spike_acl->get(),
+          grad_v_final_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          detach_reset,
+          surrogate_alpha,
+          grad_x_acl->get(),
+          grad_v_init_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyIfCompactBackwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null compact IF backward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(h_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(h_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyIfCompactBackward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       h_acl,
+       spike_acl,
+       grad_spike_acl,
+       grad_v_final_acl,
+       grad_x_acl,
+       grad_v_init_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyIfCompactBackward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {grad_x_seq, grad_v_init};
+}
+
 std::vector<at::Tensor> lif_forward(
     const at::Tensor& x_seq,
     const at::Tensor& v_init,
@@ -537,6 +690,165 @@ std::vector<at::Tensor> lif_backward(
         void* workspace_pointer =
             workspace.defined() ? workspace.data_ptr() : nullptr;
         return aclnnAsPyLifBackward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {grad_x_seq, grad_v_init};
+}
+
+std::vector<at::Tensor> lif_forward_compact(
+    const at::Tensor& x_seq,
+    const at::Tensor& v_init,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset,
+    double tau,
+    bool decay_input) {
+  check_sequence(x_seq, "x_seq");
+  check_tensor(v_init, "v_init");
+  TORCH_CHECK(std::isfinite(tau) && tau > 1.0, "tau must be finite and greater than 1");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(v_init.device() == x_seq.device(), "v_init must be on the same NPU");
+  TORCH_CHECK(
+      v_init.sizes().equals(x_seq.sizes().slice(1)),
+      "v_init shape mismatch");
+
+  c10_npu::NPUGuard device_guard(x_seq.device());
+  at::Tensor spike_seq = empty_nd_like(x_seq);
+  at::Tensor v_final = empty_nd_like(v_init);
+  at::Tensor h_seq = empty_nd_like(x_seq);
+
+  auto x_acl = std::make_shared<AclTensorHandle>(x_seq);
+  auto v_init_acl = std::make_shared<AclTensorHandle>(v_init);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto v_final_acl = std::make_shared<AclTensorHandle>(v_final);
+  auto h_seq_acl = std::make_shared<AclTensorHandle>(h_seq);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyLifCompactForwardGetWorkspaceSize(
+          x_acl->get(),
+          v_init_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          tau,
+          decay_input,
+          spike_acl->get(),
+          v_final_acl->get(),
+          h_seq_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyLifCompactForwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null compact LIF forward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(x_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(x_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyLifCompactForward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       x_acl,
+       v_init_acl,
+       spike_acl,
+       v_final_acl,
+       h_seq_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyLifCompactForward(
+            workspace_pointer, workspace_size, executor, stream);
+      });
+  return {spike_seq, v_final, h_seq};
+}
+
+std::vector<at::Tensor> lif_backward_compact(
+    const at::Tensor& h_seq,
+    const at::Tensor& spike_seq,
+    const at::Tensor& grad_spike_seq,
+    const at::Tensor& grad_v_final,
+    double v_threshold,
+    double v_reset,
+    bool hard_reset,
+    bool detach_reset,
+    double surrogate_alpha,
+    double tau,
+    bool decay_input) {
+  check_sequence(h_seq, "h_seq");
+  check_sequence(spike_seq, "spike_seq");
+  check_sequence(grad_spike_seq, "grad_spike_seq");
+  check_tensor(grad_v_final, "grad_v_final");
+  TORCH_CHECK(std::isfinite(tau) && tau > 1.0, "tau must be finite and greater than 1");
+  TORCH_CHECK(std::isfinite(v_threshold), "v_threshold must be finite");
+  TORCH_CHECK(std::isfinite(v_reset), "v_reset must be finite");
+  TORCH_CHECK(
+      std::isfinite(surrogate_alpha) && surrogate_alpha > 0.0,
+      "surrogate_alpha must be finite and positive");
+  TORCH_CHECK(spike_seq.sizes().equals(h_seq.sizes()), "spike_seq shape mismatch");
+  TORCH_CHECK(
+      grad_spike_seq.sizes().equals(h_seq.sizes()),
+      "grad_spike_seq shape mismatch");
+  TORCH_CHECK(
+      grad_v_final.sizes().equals(h_seq.sizes().slice(1)),
+      "grad_v_final shape mismatch");
+  for (const at::Tensor* tensor : {&spike_seq, &grad_spike_seq, &grad_v_final}) {
+    TORCH_CHECK(tensor->device() == h_seq.device(), "backward tensor device mismatch");
+  }
+
+  c10_npu::NPUGuard device_guard(h_seq.device());
+  at::Tensor grad_x_seq = empty_nd_like(h_seq);
+  at::Tensor grad_v_init = empty_nd_like(grad_v_final);
+
+  auto h_acl = std::make_shared<AclTensorHandle>(h_seq);
+  auto spike_acl = std::make_shared<AclTensorHandle>(spike_seq);
+  auto grad_spike_acl = std::make_shared<AclTensorHandle>(grad_spike_seq);
+  auto grad_v_final_acl = std::make_shared<AclTensorHandle>(grad_v_final);
+  auto grad_x_acl = std::make_shared<AclTensorHandle>(grad_x_seq);
+  auto grad_v_init_acl = std::make_shared<AclTensorHandle>(grad_v_init);
+
+  uint64_t workspace_size = 0;
+  aclOpExecutor* executor = nullptr;
+  check_aclnn(
+      aclnnAsPyLifCompactBackwardGetWorkspaceSize(
+          h_acl->get(),
+          spike_acl->get(),
+          grad_spike_acl->get(),
+          grad_v_final_acl->get(),
+          v_threshold,
+          v_reset,
+          hard_reset,
+          detach_reset,
+          surrogate_alpha,
+          tau,
+          decay_input,
+          grad_x_acl->get(),
+          grad_v_init_acl->get(),
+          &workspace_size,
+          &executor),
+      "aclnnAsPyLifCompactBackwardGetWorkspaceSize");
+  TORCH_CHECK(executor != nullptr, "ACLNN returned a null compact LIF backward executor");
+
+  const auto stream =
+      c10_npu::getCurrentNPUStream(h_seq.device().index()).stream(false);
+  at::Tensor workspace = make_workspace(h_seq, workspace_size);
+  at_npu::native::OpCommand::RunOpApiV2(
+      "aclnnAsPyLifCompactBackward",
+      [workspace,
+       workspace_size,
+       executor,
+       stream,
+       h_acl,
+       spike_acl,
+       grad_spike_acl,
+       grad_v_final_acl,
+       grad_x_acl,
+       grad_v_init_acl]() mutable -> int {
+        void* workspace_pointer =
+            workspace.defined() ? workspace.data_ptr() : nullptr;
+        return aclnnAsPyLifCompactBackward(
             workspace_pointer, workspace_size, executor, stream);
       });
   return {grad_x_seq, grad_v_init};
@@ -956,8 +1268,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       "AsPy exact FedSNN decay-LIF backward (NPU)");
   module.def("if_forward", &if_forward, "AsPy IF forward (NPU)");
   module.def("if_backward", &if_backward, "AsPy IF backward (NPU)");
+  module.def(
+      "if_forward_compact",
+      &if_forward_compact,
+      "AsPy compact IF forward without vSeq (NPU)");
+  module.def(
+      "if_backward_compact",
+      &if_backward_compact,
+      "AsPy compact IF backward without gradVSeq (NPU)");
   module.def("lif_forward", &lif_forward, "AsPy LIF forward (NPU)");
   module.def("lif_backward", &lif_backward, "AsPy LIF backward (NPU)");
+  module.def(
+      "lif_forward_compact",
+      &lif_forward_compact,
+      "AsPy compact LIF forward without vSeq (NPU)");
+  module.def(
+      "lif_backward_compact",
+      &lif_backward_compact,
+      "AsPy compact LIF backward without gradVSeq (NPU)");
   module.def("klif_forward", &klif_forward, "AsPy KLIF forward (NPU)");
   module.def("klif_backward", &klif_backward, "AsPy KLIF backward (NPU)");
   module.def("plif_forward", &plif_forward, "AsPy PLIF forward (NPU)");

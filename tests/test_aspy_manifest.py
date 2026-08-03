@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -30,23 +32,29 @@ def test_operator_manifest_matches_all_current_native_sources_and_symbols():
     assert manifest.capabilities == (
         "fedsnn_decay_lif",
         "if",
+        "if_compact",
         "klif",
         "lif",
+        "lif_compact",
         "plif",
     )
     assert manifest.symbols == (
         "fedsnn_decay_lif_backward",
         "fedsnn_decay_lif_forward",
         "if_backward",
+        "if_backward_compact",
         "if_forward",
+        "if_forward_compact",
         "klif_backward",
         "klif_forward",
         "lif_backward",
+        "lif_backward_compact",
         "lif_forward",
+        "lif_forward_compact",
         "plif_backward",
         "plif_forward",
     )
-    assert len(manifest.operators) == 10
+    assert len(manifest.operators) == 14
 
 
 def test_manifest_script_output_is_deterministic_and_machine_readable():
@@ -73,10 +81,86 @@ def test_manifest_script_output_is_deterministic_and_machine_readable():
     assert sorted(capabilities["capabilities"]) == [
         "fedsnn_decay_lif",
         "if",
+        "if_compact",
         "klif",
         "lif",
+        "lif_compact",
         "plif",
     ]
+
+
+def test_distribution_manifests_cover_compact_native_contract():
+    manifest_entries = {
+        "native/aspy/operator_manifest.json",
+        "native/aspy/definition/aspy_if_compact_forward.json",
+        "native/aspy/definition/aspy_lif_compact_forward.json",
+        "native/aspy/op_host/as_py_if_compact_forward.cpp",
+        "native/aspy/op_host/as_py_if_compact_forward_tiling.h",
+        "native/aspy/op_host/as_py_if_compact_backward.cpp",
+        "native/aspy/op_host/as_py_if_compact_backward_tiling.h",
+        "native/aspy/op_host/as_py_lif_compact_forward.cpp",
+        "native/aspy/op_host/as_py_lif_compact_forward_tiling.h",
+        "native/aspy/op_host/as_py_lif_compact_backward.cpp",
+        "native/aspy/op_host/as_py_lif_compact_backward_tiling.h",
+        "native/aspy/op_kernel/as_py_if_compact_forward.cpp",
+        "native/aspy/op_kernel/as_py_if_compact_backward.cpp",
+        "native/aspy/op_kernel/as_py_lif_compact_forward.cpp",
+        "native/aspy/op_kernel/as_py_lif_compact_backward.cpp",
+        "native/aspy/bridge/aspy_bridge.cpp",
+        "scripts/build_aspy.py",
+        "scripts/build_aspy.sh",
+        "tests/test_aspy_adapter.py",
+        "tests/test_aspy_manifest.py",
+        "tests/test_routing.py",
+    }
+    rules = (ROOT / "MANIFEST.in").read_text()
+
+    assert "recursive-include native/aspy" in rules
+    assert "recursive-include scripts *.sh *.py" in rules
+    assert "recursive-include tests *.py" in rules
+    assert all((ROOT / relative).is_file() for relative in manifest_entries)
+
+
+def audit_built_distributions(dist_directory: Path) -> None:
+    """Audit externally built archives for the complete compact source contract."""
+
+    required_source_suffixes = {
+        "native/aspy/operator_manifest.json",
+        "native/aspy/definition/aspy_if_compact_forward.json",
+        "native/aspy/definition/aspy_lif_compact_forward.json",
+        "native/aspy/op_host/as_py_if_compact_forward.cpp",
+        "native/aspy/op_host/as_py_if_compact_forward_tiling.h",
+        "native/aspy/op_host/as_py_if_compact_backward.cpp",
+        "native/aspy/op_host/as_py_if_compact_backward_tiling.h",
+        "native/aspy/op_host/as_py_lif_compact_forward.cpp",
+        "native/aspy/op_host/as_py_lif_compact_forward_tiling.h",
+        "native/aspy/op_host/as_py_lif_compact_backward.cpp",
+        "native/aspy/op_host/as_py_lif_compact_backward_tiling.h",
+        "native/aspy/op_kernel/as_py_if_compact_forward.cpp",
+        "native/aspy/op_kernel/as_py_if_compact_backward.cpp",
+        "native/aspy/op_kernel/as_py_lif_compact_forward.cpp",
+        "native/aspy/op_kernel/as_py_lif_compact_backward.cpp",
+        "native/aspy/bridge/aspy_bridge.cpp",
+        "scripts/build_aspy.py",
+        "scripts/build_aspy.sh",
+        "tests/test_aspy_adapter.py",
+        "tests/test_aspy_manifest.py",
+        "tests/test_routing.py",
+    }
+    sdists = sorted(dist_directory.glob("*.tar.gz"))
+    wheels = sorted(dist_directory.glob("*.whl"))
+    assert len(sdists) == 1
+    assert len(wheels) == 1
+
+    with tarfile.open(sdists[0]) as archive:
+        sdist_names = {name.split("/", 1)[-1] for name in archive.getnames()}
+    missing = sorted(required_source_suffixes - sdist_names)
+    assert not missing, f"sdist is missing compact source contract entries: {missing}"
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        wheel_names = set(archive.namelist())
+    assert "spikingjelly_npu_aspy.py" in wheel_names
+    assert "spikingjelly_npu/routing.py" in wheel_names
 
 
 def _copy_manifest_native_tree(tmp_path: Path) -> Path:

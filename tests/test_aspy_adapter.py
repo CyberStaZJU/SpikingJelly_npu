@@ -11,8 +11,12 @@ def install_fake_native(
     *,
     forward,
     backward=None,
+    if_forward_compact=None,
+    if_backward_compact=None,
     lif_forward=None,
     lif_backward=None,
+    lif_forward_compact=None,
+    lif_backward_compact=None,
     plif_forward=None,
     plif_backward=None,
     klif_forward=None,
@@ -31,6 +35,15 @@ def install_fake_native(
         "klif_forward": forward if klif_forward is None else klif_forward,
         "klif_backward": (lambda *args: None) if klif_backward is None else klif_backward,
     }
+    compact_symbols = {
+        "if_forward_compact": if_forward_compact,
+        "if_backward_compact": if_backward_compact,
+        "lif_forward_compact": lif_forward_compact,
+        "lif_backward_compact": lif_backward_compact,
+    }
+    symbols.update(
+        (name, value) for name, value in compact_symbols.items() if value is not None
+    )
     if include_fedsnn_symbols:
         symbols.update(
             fedsnn_decay_lif_forward=(
@@ -77,6 +90,102 @@ def test_aspy_adapter_exposes_native_capability_contract(monkeypatch):
     assert adapter.aspy_capabilities() == payload
 
 
+def test_aspy_adapter_versioned_bundle_ignores_undeclared_raw_compact_symbols(
+    monkeypatch,
+):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.zeros_like(v_init),
+            torch.zeros_like(x_seq),
+        )
+
+    native = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: {
+            "schema_version": 1,
+            "capabilities": {"if": ["if_forward", "if_backward"]},
+            "symbols": ["if_forward", "if_backward"],
+        },
+        if_forward=legacy_forward,
+        if_backward=lambda *args: None,
+        if_forward_compact=lambda *args: calls.append("compact_forward"),
+        if_backward_compact=lambda *args: None,
+        lif_forward=lambda *args: None,
+        lif_backward=lambda *args: None,
+        plif_forward=lambda *args: None,
+        plif_backward=lambda *args: None,
+    )
+    monkeypatch.setitem(sys.modules, "_spikingjelly_npu_aspy", native)
+    sys.modules.pop("spikingjelly_npu_aspy", None)
+    adapter = importlib.import_module("spikingjelly_npu_aspy")
+
+    assert adapter.supports_if_compact is False
+    _, _, v_seq = adapter.if_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    assert v_seq is None
+    assert calls == ["legacy_forward"]
+
+
+def test_aspy_adapter_malformed_versioned_metadata_disables_raw_compact_symbols(
+    monkeypatch,
+):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.zeros_like(v_init),
+            torch.zeros_like(x_seq),
+        )
+
+    native = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: {"schema_version": 2},
+        if_forward=legacy_forward,
+        if_backward=lambda *args: None,
+        if_forward_compact=lambda *args: calls.append("compact_forward"),
+        if_backward_compact=lambda *args: None,
+        lif_forward=lambda *args: None,
+        lif_backward=lambda *args: None,
+        plif_forward=lambda *args: None,
+        plif_backward=lambda *args: None,
+    )
+    monkeypatch.setitem(sys.modules, "_spikingjelly_npu_aspy", native)
+    sys.modules.pop("spikingjelly_npu_aspy", None)
+    adapter = importlib.import_module("spikingjelly_npu_aspy")
+
+    assert adapter.supports_if_compact is False
+    _, _, v_seq = adapter.if_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    assert v_seq is None
+    assert calls == ["legacy_forward"]
+
+
 def test_aspy_adapter_imports_older_native_without_fedsnn_symbols(monkeypatch):
     adapter = install_fake_native(
         monkeypatch,
@@ -93,6 +202,467 @@ def test_aspy_adapter_imports_older_native_without_fedsnn_symbols(monkeypatch):
             "atan",
             2.0,
         )
+
+
+def test_aspy_if_compact_bundle_selects_compact_and_crops_backward(monkeypatch):
+    calls = []
+
+    def legacy_forward(*args):
+        calls.append(("legacy_forward", args))
+        raise AssertionError("legacy IF forward must not run")
+
+    def legacy_backward(*args):
+        calls.append(("legacy_backward", args))
+        raise AssertionError("legacy IF backward must not run")
+
+    def compact_forward(x_seq, v_init, *attributes):
+        calls.append(("compact_forward", x_seq, v_init, attributes))
+        return (
+            torch.ones_like(x_seq),
+            torch.full_like(v_init, 0.25),
+            torch.full_like(x_seq, 0.5),
+        )
+
+    def compact_backward(*args):
+        calls.append(("compact_backward", args))
+        h_seq, spike_seq, grad_spike_seq, grad_v_final = args[:4]
+        assert h_seq.shape == (2, 8)
+        assert spike_seq.shape == (2, 8)
+        assert grad_spike_seq.shape == (2, 8)
+        assert grad_v_final.shape == (8,)
+        assert args[4:] == (1.0, 0.5, True, False, 2.0)
+        return torch.full_like(h_seq, 2.0), torch.full_like(grad_v_final, 3.0)
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=legacy_forward,
+        backward=legacy_backward,
+        if_forward_compact=compact_forward,
+        if_backward_compact=compact_backward,
+    )
+    x_seq = torch.zeros(2, 1, 1, requires_grad=True)
+    v_init = torch.zeros(1, 1, requires_grad=True)
+
+    spike_seq, v_final, v_seq = adapter.if_multi_step(
+        x_seq,
+        v_init,
+        1.0,
+        0.5,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+    assert v_seq is None
+    (spike_seq.sum() + v_final.sum()).backward()
+
+    assert [call[0] for call in calls] == ["compact_forward", "compact_backward"]
+    assert calls[0][1].shape == (2, 8)
+    assert calls[0][2].shape == (8,)
+    assert calls[0][3] == (1.0, 0.5, True)
+    torch.testing.assert_close(x_seq.grad, torch.full_like(x_seq, 2.0))
+    torch.testing.assert_close(v_init.grad, torch.full_like(v_init, 3.0))
+
+
+def test_aspy_if_compact_backward_failure_is_fatal_without_legacy_replay(monkeypatch):
+    calls = []
+
+    def compact_forward(x_seq, v_init, *attributes):
+        calls.append("compact_forward")
+        return torch.ones_like(x_seq), torch.zeros_like(v_init), torch.zeros_like(x_seq)
+
+    def compact_backward(*args):
+        calls.append("compact_backward")
+        raise RuntimeError("compact IF backward launch failed")
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: calls.append("legacy_forward"),
+        backward=lambda *args: calls.append("legacy_backward"),
+        if_forward_compact=compact_forward,
+        if_backward_compact=compact_backward,
+    )
+    spike_seq, _, _ = adapter.if_multi_step(
+        torch.zeros(2, 1, 8, requires_grad=True),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    with pytest.raises(RuntimeError, match="compact IF backward launch failed"):
+        spike_seq.sum().backward()
+    assert calls == ["compact_forward", "compact_backward"]
+
+
+def test_aspy_if_compact_rejects_higher_order_without_legacy_replay(monkeypatch):
+    calls = []
+
+    def compact_forward(x_seq, v_init, *attributes):
+        calls.append("compact_forward")
+        return torch.ones_like(x_seq), torch.zeros_like(v_init), torch.zeros_like(x_seq)
+
+    def compact_backward(h_seq, spike_seq, *args):
+        calls.append("compact_backward")
+        return torch.ones_like(h_seq), torch.ones_like(spike_seq[0])
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: calls.append("legacy_forward"),
+        backward=lambda *args: calls.append("legacy_backward"),
+        if_forward_compact=compact_forward,
+        if_backward_compact=compact_backward,
+    )
+    x_seq = torch.zeros(2, 1, 1, requires_grad=True)
+    spike_seq, _, _ = adapter.if_multi_step(
+        x_seq,
+        torch.zeros(1, 1),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    with pytest.raises(RuntimeError, match="compact IF supports first-order gradients only"):
+        torch.autograd.grad(spike_seq.sum(), x_seq, create_graph=True)
+    assert calls == ["compact_forward"]
+
+
+def test_aspy_if_store_v_seq_uses_legacy_when_compact_exists(monkeypatch):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.full_like(x_seq, 0.25),
+            torch.full_like(v_init, 0.25),
+            torch.full_like(x_seq, 0.5),
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=legacy_forward,
+        if_forward_compact=lambda *args: calls.append("compact_forward"),
+        if_backward_compact=lambda *args: None,
+    )
+    spike_seq, v_final, v_seq = adapter.if_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        True,
+    )
+
+    assert calls == ["legacy_forward"]
+    torch.testing.assert_close(spike_seq, torch.ones(2, 1, 8))
+    torch.testing.assert_close(v_final, torch.full((1, 8), 0.25))
+    torch.testing.assert_close(v_seq, torch.full((2, 1, 8), 0.25))
+
+
+@pytest.mark.parametrize(
+    ("if_forward_compact", "if_backward_compact"),
+    [(lambda *args: None, None), (None, lambda *args: None)],
+)
+def test_aspy_if_partial_compact_pair_uses_legacy_before_launch(
+    monkeypatch, if_forward_compact, if_backward_compact
+):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.zeros_like(v_init),
+            torch.zeros_like(x_seq),
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=legacy_forward,
+        if_forward_compact=if_forward_compact,
+        if_backward_compact=if_backward_compact,
+    )
+    assert adapter.supports_if_compact is False
+
+    _, _, v_seq = adapter.if_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        None,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    assert v_seq is None
+    assert calls == ["legacy_forward"]
+
+
+def test_aspy_if_old_bundle_strict_semantics_use_legacy_native(monkeypatch):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.full_like(v_init, 0.25),
+            torch.zeros_like(x_seq),
+        )
+
+    adapter = install_fake_native(monkeypatch, forward=legacy_forward)
+    assert adapter.supports_if_compact is False
+
+    spike_seq, v_final, v_seq = adapter.if_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+    )
+
+    assert calls == ["legacy_forward"]
+    assert v_seq is None
+    torch.testing.assert_close(spike_seq, torch.ones(2, 1, 8))
+    torch.testing.assert_close(v_final, torch.full((1, 8), 0.25))
+
+
+def test_aspy_if_compact_failure_is_fatal_without_legacy_replay(monkeypatch):
+    calls = []
+
+    def compact_forward(*args):
+        calls.append("compact_forward")
+        raise RuntimeError("compact IF launch failed")
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: calls.append("legacy_forward"),
+        if_forward_compact=compact_forward,
+        if_backward_compact=lambda *args: None,
+    )
+
+    with pytest.raises(RuntimeError, match="compact IF launch failed"):
+        adapter.if_multi_step(
+            torch.zeros(2, 1, 8),
+            torch.zeros(1, 8),
+            1.0,
+            0.0,
+            False,
+            "atan",
+            2.0,
+            False,
+        )
+    assert calls == ["compact_forward"]
+
+
+def test_aspy_lif_compact_failure_is_fatal_without_legacy_replay(monkeypatch):
+    calls = []
+
+    def compact_forward(*args):
+        calls.append("compact_forward")
+        raise RuntimeError("compact LIF launch failed")
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        lif_forward=lambda *args: calls.append("legacy_forward"),
+        lif_forward_compact=compact_forward,
+        lif_backward_compact=lambda *args: None,
+    )
+
+    with pytest.raises(RuntimeError, match="compact LIF launch failed"):
+        adapter.lif_multi_step(
+            torch.zeros(2, 1, 8),
+            torch.zeros(1, 8),
+            1.0,
+            0.0,
+            False,
+            "atan",
+            2.0,
+            False,
+            2.5,
+            False,
+        )
+    assert calls == ["compact_forward"]
+
+
+def test_aspy_lif_compact_rejects_higher_order_without_legacy_replay(monkeypatch):
+    calls = []
+
+    def compact_forward(x_seq, v_init, *attributes):
+        calls.append("compact_forward")
+        return torch.ones_like(x_seq), torch.zeros_like(v_init), torch.zeros_like(x_seq)
+
+    def compact_backward(h_seq, spike_seq, *args):
+        calls.append("compact_backward")
+        return torch.ones_like(h_seq), torch.ones_like(spike_seq[0])
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        lif_forward=lambda *args: calls.append("legacy_forward"),
+        lif_backward=lambda *args: calls.append("legacy_backward"),
+        lif_forward_compact=compact_forward,
+        lif_backward_compact=compact_backward,
+    )
+    x_seq = torch.zeros(2, 1, 1, requires_grad=True)
+    spike_seq, _, _ = adapter.lif_multi_step(
+        x_seq,
+        torch.zeros(1, 1),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        False,
+        2.0,
+        True,
+    )
+
+    with pytest.raises(RuntimeError, match="compact LIF supports first-order gradients only"):
+        torch.autograd.grad(spike_seq.sum(), x_seq, create_graph=True)
+    assert calls == ["compact_forward"]
+
+
+def test_aspy_lif_store_v_seq_uses_legacy_when_compact_exists(monkeypatch):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append(("legacy_forward", attributes))
+        return (
+            torch.ones_like(x_seq),
+            torch.full_like(x_seq, 0.25),
+            torch.full_like(v_init, 0.25),
+            torch.full_like(x_seq, 0.5),
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        lif_forward=legacy_forward,
+        lif_forward_compact=lambda *args: calls.append(("compact_forward", args)),
+        lif_backward_compact=lambda *args: None,
+    )
+    _, _, v_seq = adapter.lif_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        0.0,
+        False,
+        "atan",
+        2.0,
+        True,
+        2.5,
+        False,
+    )
+
+    assert calls == [("legacy_forward", (1.0, 0.0, True, 2.5, False))]
+    torch.testing.assert_close(v_seq, torch.full((2, 1, 8), 0.25))
+
+
+def test_aspy_lif_partial_compact_pair_uses_legacy(monkeypatch):
+    calls = []
+
+    def legacy_forward(x_seq, v_init, *attributes):
+        calls.append("legacy_forward")
+        return (
+            torch.ones_like(x_seq),
+            torch.zeros_like(x_seq),
+            torch.zeros_like(v_init),
+            torch.zeros_like(x_seq),
+        )
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: None,
+        lif_forward=legacy_forward,
+        lif_forward_compact=lambda *args: calls.append("compact_forward"),
+    )
+    assert adapter.supports_lif_compact is False
+
+    _, _, v_seq = adapter.lif_multi_step(
+        torch.zeros(2, 1, 8),
+        torch.zeros(1, 8),
+        1.0,
+        None,
+        False,
+        "atan",
+        2.0,
+        False,
+        2.5,
+        True,
+    )
+
+    assert v_seq is None
+    assert calls == ["legacy_forward"]
+
+
+def test_aspy_lif_compact_contract_supports_reset_decay_and_cropping(monkeypatch):
+    calls = []
+
+    def compact_forward(x_seq, v_init, *attributes):
+        calls.append(("compact_forward", x_seq, v_init, attributes))
+        return (
+            torch.ones_like(x_seq),
+            torch.full_like(v_init, 0.25),
+            torch.full_like(x_seq, 0.5),
+        )
+
+    def compact_backward(*args):
+        calls.append(("compact_backward", args))
+        h_seq, _, grad_spike_seq, grad_v_final = args[:4]
+        assert h_seq.shape == (3, 8)
+        assert grad_spike_seq.shape == (3, 8)
+        assert grad_v_final.shape == (8,)
+        assert args[4:] == (0.7, 0.0, False, True, 2.5, 3.0, True)
+        return torch.full_like(h_seq, 4.0), torch.full_like(grad_v_final, 5.0)
+
+    adapter = install_fake_native(
+        monkeypatch,
+        forward=lambda *args: (_ for _ in ()).throw(
+            AssertionError("legacy LIF forward must not run")
+        ),
+        lif_forward_compact=compact_forward,
+        lif_backward_compact=compact_backward,
+    )
+    x_seq = torch.zeros(3, 1, 3, requires_grad=True)
+    v_init = torch.zeros(1, 3, requires_grad=True)
+
+    spike_seq, v_final, v_seq = adapter.lif_multi_step(
+        x_seq,
+        v_init,
+        0.7,
+        None,
+        True,
+        "atan",
+        2.5,
+        False,
+        3.0,
+        True,
+    )
+    assert v_seq is None
+    (spike_seq.sum() + v_final.sum()).backward()
+
+    assert [call[0] for call in calls] == ["compact_forward", "compact_backward"]
+    assert calls[0][1].shape == (3, 8)
+    torch.testing.assert_close(calls[0][2][3:], torch.zeros(5))
+    assert calls[0][3] == (0.7, 0.0, False, 3.0, True)
+    torch.testing.assert_close(x_seq.grad, torch.full_like(x_seq, 4.0))
+    torch.testing.assert_close(v_init.grad, torch.full_like(v_init, 5.0))
 
 
 def test_aspy_adapter_validates_every_generic_native_tensor(monkeypatch):

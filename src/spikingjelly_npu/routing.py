@@ -38,8 +38,10 @@ _LEGACY_CAPABILITY_SYMBOLS = {
         "fedsnn_decay_lif_backward",
     ),
     "if": ("if_forward", "if_backward"),
+    "if_compact": ("if_forward_compact", "if_backward_compact"),
     "klif": ("klif_forward", "klif_backward"),
     "lif": ("lif_forward", "lif_backward"),
+    "lif_compact": ("lif_forward_compact", "lif_backward_compact"),
     "plif": ("plif_forward", "plif_backward"),
 }
 
