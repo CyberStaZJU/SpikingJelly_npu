@@ -25,6 +25,16 @@ class ShiftedSigmoid(nn.Module):
         return torch.sigmoid(x + self.shift)
 
 
+class ParameterizedSurrogate(nn.Module):
+    def __init__(self, scale: float) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(scale))
+        self.register_buffer("offset", torch.tensor(0.25))
+
+    def forward(self, x):
+        return torch.sigmoid(x * self.scale + self.offset)
+
+
 CELL_CASES = [
     (SpikingRNNCell, {}),
     (SpikingGRUCell, {}),
@@ -371,6 +381,84 @@ def test_sequence_state_dict_uses_exact_flat_torch_names(module_type, kwargs):
     assert tuple(module.state_dict()) == tuple(expected)
     assert not any("cells" in name or "surrogate" in name for name in module.state_dict())
     assert len(module.all_weights) == 4
+
+
+@pytest.mark.parametrize("module_type", [SpikingGRU, SpikingLSTM])
+def test_shared_parameterized_surrogate_has_one_checkpoint_namespace(module_type):
+    first = ParameterizedSurrogate(1.5)
+    module = module_type(2, 3, surrogate_function1=first)
+
+    assert module.surrogate_function2 is module.surrogate_function1
+    assert "surrogate_function2" not in module._modules
+    assert tuple(name for name in module.state_dict() if name.startswith("surrogate")) == (
+        "surrogate_function1.scale",
+        "surrogate_function1.offset",
+    )
+
+    clone = module_type(2, 3, surrogate_function1=ParameterizedSurrogate(-3.0))
+    clone.load_state_dict(module.state_dict(), strict=True)
+    torch.testing.assert_close(clone.surrogate_function1.scale, first.scale)
+    torch.testing.assert_close(clone.surrogate_function1.offset, first.offset)
+
+    replacement = ParameterizedSurrogate(2.0)
+    module.surrogate_function1 = replacement
+    assert module.surrogate_function2 is replacement
+
+
+@pytest.mark.parametrize("module_type", [SpikingGRU, SpikingLSTM])
+def test_distinct_parameterized_surrogates_keep_distinct_checkpoint_names(module_type):
+    first = ParameterizedSurrogate(1.5)
+    second = ParameterizedSurrogate(2.5)
+    module = module_type(
+        2,
+        3,
+        surrogate_function1=first,
+        surrogate_function2=second,
+    )
+
+    assert module.surrogate_function2 is second
+    assert {name for name in module.state_dict() if name.startswith("surrogate")} == {
+        "surrogate_function1.scale",
+        "surrogate_function1.offset",
+        "surrogate_function2.scale",
+        "surrogate_function2.offset",
+    }
+
+
+@pytest.mark.parametrize("module_type", [SpikingRNN, SpikingGRU, SpikingLSTM])
+def test_sequence_reset_parameters_does_not_modify_surrogate_parameters(module_type):
+    surrogate_function = ParameterizedSurrogate(1.75)
+    kwargs = (
+        {"surrogate_function": surrogate_function}
+        if module_type is SpikingRNN
+        else {"surrogate_function1": surrogate_function}
+    )
+    module = module_type(2, 3, **kwargs)
+    before_parameter = surrogate_function.scale.detach().clone()
+    before_buffer = surrogate_function.offset.detach().clone()
+
+    module.reset_parameters()
+
+    torch.testing.assert_close(surrogate_function.scale, before_parameter)
+    torch.testing.assert_close(surrogate_function.offset, before_buffer)
+
+
+@pytest.mark.parametrize("cell_type", [SpikingRNNCell, SpikingGRUCell, SpikingLSTMCell])
+def test_cell_reset_parameters_does_not_modify_surrogate_parameters(cell_type):
+    surrogate_function = ParameterizedSurrogate(1.75)
+    kwargs = (
+        {"surrogate_function": surrogate_function}
+        if cell_type is SpikingRNNCell
+        else {"surrogate_function1": surrogate_function}
+    )
+    cell = cell_type(2, 3, **kwargs)
+    before_parameter = surrogate_function.scale.detach().clone()
+    before_buffer = surrogate_function.offset.detach().clone()
+
+    cell.reset_parameters()
+
+    torch.testing.assert_close(surrogate_function.scale, before_parameter)
+    torch.testing.assert_close(surrogate_function.offset, before_buffer)
 
 
 @pytest.mark.parametrize(("module_type", "kwargs"), SEQUENCE_CASES)

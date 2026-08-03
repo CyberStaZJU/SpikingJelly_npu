@@ -21,6 +21,24 @@ def _surrogate_or_default(value: nn.Module | None) -> nn.Module:
     return surrogate.ATan() if value is None else value
 
 
+def _reset_cell_parameters(module: nn.Module, hidden_size: int) -> None:
+    stdv = hidden_size**-0.5
+    for name in ("weight_ih", "weight_hh", "bias_ih", "bias_hh"):
+        parameter = getattr(module, name, None)
+        if parameter is not None:
+            nn.init.uniform_(parameter, -stdv, stdv)
+
+
+class _DualSurrogateMixin:
+    def __getattr__(self, name: str):
+        if name == "surrogate_function2":
+            modules = self.__dict__.get("_modules", {})
+            explicit = modules.get(name)
+            if explicit is None:
+                return nn.Module.__getattr__(self, "surrogate_function1")
+        return super().__getattr__(name)
+
+
 def _prepare_cell_input(
     input: Tensor,
     input_size: int,
@@ -147,6 +165,9 @@ class SpikingRNNCell(nn.RNNCell):
         del self.nonlinearity
         self.surrogate_function = _surrogate_or_default(surrogate_function)
 
+    def reset_parameters(self) -> None:
+        _reset_cell_parameters(self, self.hidden_size)
+
     def forward(self, input: Tensor, hx: Tensor | None = None) -> Tensor:
         input, is_batched = _prepare_cell_input(
             input, self.input_size, self.__class__.__name__
@@ -171,7 +192,7 @@ class SpikingRNNCell(nn.RNNCell):
         return hidden if is_batched else hidden.squeeze(0)
 
 
-class SpikingGRUCell(nn.GRUCell):
+class SpikingGRUCell(_DualSurrogateMixin, nn.GRUCell):
     """A GRU cell with spiking reset, update, and candidate gates."""
 
     def __init__(
@@ -192,11 +213,11 @@ class SpikingGRUCell(nn.GRUCell):
             dtype=dtype,
         )
         self.surrogate_function1 = _surrogate_or_default(surrogate_function1)
-        self.surrogate_function2 = (
-            self.surrogate_function1
-            if surrogate_function2 is None
-            else surrogate_function2
-        )
+        if surrogate_function2 is not None:
+            self.surrogate_function2 = surrogate_function2
+
+    def reset_parameters(self) -> None:
+        _reset_cell_parameters(self, self.hidden_size)
 
     def forward(self, input: Tensor, hx: Tensor | None = None) -> Tensor:
         input, is_batched = _prepare_cell_input(
@@ -223,7 +244,7 @@ class SpikingGRUCell(nn.GRUCell):
         return hidden if is_batched else hidden.squeeze(0)
 
 
-class SpikingLSTMCell(nn.LSTMCell):
+class SpikingLSTMCell(_DualSurrogateMixin, nn.LSTMCell):
     """An LSTM cell with binary gates, capped cell state, and no output tanh."""
 
     def __init__(
@@ -244,11 +265,11 @@ class SpikingLSTMCell(nn.LSTMCell):
             dtype=dtype,
         )
         self.surrogate_function1 = _surrogate_or_default(surrogate_function1)
-        self.surrogate_function2 = (
-            self.surrogate_function1
-            if surrogate_function2 is None
-            else surrogate_function2
-        )
+        if surrogate_function2 is not None:
+            self.surrogate_function2 = surrogate_function2
+
+    def reset_parameters(self) -> None:
+        _reset_cell_parameters(self, self.hidden_size)
 
     def forward(
         self,
@@ -431,8 +452,8 @@ class _SpikingRecurrentBase(base.MemoryModule):
 
     def reset_parameters(self) -> None:
         stdv = self.hidden_size**-0.5
-        for parameter in self.parameters():
-            nn.init.uniform_(parameter, -stdv, stdv)
+        for name in self._flat_weights_names:
+            nn.init.uniform_(getattr(self, name), -stdv, stdv)
 
     def reset(self) -> None:
         self.hx = None
@@ -725,7 +746,7 @@ class SpikingRNN(_SpikingRecurrentBase):
         self.surrogate_function = _surrogate_or_default(surrogate_function)
 
 
-class SpikingGRU(_SpikingRecurrentBase):
+class SpikingGRU(_DualSurrogateMixin, _SpikingRecurrentBase):
     """A dense multi-layer spiking GRU."""
 
     _gate_count = 3
@@ -758,14 +779,11 @@ class SpikingGRU(_SpikingRecurrentBase):
             dtype=dtype,
         )
         self.surrogate_function1 = _surrogate_or_default(surrogate_function1)
-        self.surrogate_function2 = (
-            self.surrogate_function1
-            if surrogate_function2 is None
-            else surrogate_function2
-        )
+        if surrogate_function2 is not None:
+            self.surrogate_function2 = surrogate_function2
 
 
-class SpikingLSTM(_SpikingRecurrentBase):
+class SpikingLSTM(_DualSurrogateMixin, _SpikingRecurrentBase):
     """A dense multi-layer spiking LSTM without projection support."""
 
     _gate_count = 4
@@ -799,11 +817,8 @@ class SpikingLSTM(_SpikingRecurrentBase):
             dtype=dtype,
         )
         self.surrogate_function1 = _surrogate_or_default(surrogate_function1)
-        self.surrogate_function2 = (
-            self.surrogate_function1
-            if surrogate_function2 is None
-            else surrogate_function2
-        )
+        if surrogate_function2 is not None:
+            self.surrogate_function2 = surrogate_function2
 
 
 __all__ = [
