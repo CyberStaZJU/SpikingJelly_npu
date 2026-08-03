@@ -3,12 +3,14 @@ import torch
 from torch import nn
 
 from spikingjelly_npu.activation_based import functional, neuron
-from spikingjelly_npu.models import (
+from spikingjelly_npu.activation_based.model import (
     Spikformer,
     SpikformerBlock,
     SpikformerConv2dBNLIF,
     SpikformerMLP,
     SpikformerPatchStem,
+    spikformer_s,
+    spikformer_ti,
 )
 
 
@@ -31,6 +33,17 @@ def _tiny_model(**kwargs):
 
 def _voltage_keys(module):
     return [key for key in module.state_dict() if key.endswith(".v") or "v_seq" in key]
+
+
+def test_legacy_models_path_reexports_canonical_objects():
+    from spikingjelly_npu import models
+    from spikingjelly_npu.activation_based.model import spikformer as canonical_module
+    from spikingjelly_npu.models import spikformer as legacy_module
+
+    assert models.Spikformer is Spikformer is canonical_module.Spikformer
+    assert legacy_module.Spikformer is canonical_module.Spikformer
+    assert models.spikformer_ti is spikformer_ti is canonical_module.spikformer_ti
+    assert models.spikformer_s is spikformer_s is canonical_module.spikformer_s
 
 
 def test_spikformer_topology_shapes_and_no_hidden_temporal_mean():
@@ -88,6 +101,27 @@ def test_spikformer_4d_repeat_matches_explicit_5d_after_reset():
         output_5d = model(explicit)
 
     torch.testing.assert_close(output_4d, output_5d)
+
+
+def test_spikformer_4d_uses_configured_time_with_variable_spatial_size():
+    model = _tiny_model(T=3).eval()
+
+    with torch.no_grad():
+        output = model(torch.randn(1, 3, 40, 48))
+
+    assert output.shape == (3, 1, 7)
+
+
+def test_spikformer_5d_accepts_variable_time_and_spatial_size():
+    model = _tiny_model(T=2).eval()
+    sequence = torch.randn(3, 1, 3, 40, 48)
+
+    with torch.no_grad():
+        features = model.forward_features(sequence)
+        output = model(sequence)
+
+    assert features.shape == (3, 1, 32)
+    assert output.shape == (3, 1, 7)
 
 
 def test_spikformer_manual_flow_matches_public_features_and_forward():
@@ -187,6 +221,37 @@ def test_spikformer_state_dict_round_trip_reset_and_no_voltage_keys():
         torch.testing.assert_close(node.v, torch.zeros_like(node.v))
 
 
+@pytest.mark.parametrize(
+    ("factory", "embed_dims", "num_heads", "depths"),
+    [
+        (spikformer_ti, 256, 8, 4),
+        (spikformer_s, 384, 12, 6),
+    ],
+)
+def test_spikformer_factories_match_upstream_config_and_smoke(
+    factory, embed_dims, num_heads, depths
+):
+    model = factory(
+        T=1,
+        in_channels=1,
+        img_size_h=16,
+        img_size_w=16,
+        num_classes=5,
+        backend="torch",
+    ).eval()
+
+    assert isinstance(model, Spikformer)
+    assert model.T == 1
+    assert model.in_channels == 1
+    assert model.embed_dims == embed_dims
+    assert model.num_heads == num_heads
+    assert model.depths == depths
+    assert model.num_classes == 5
+    with torch.no_grad():
+        output = model(torch.randn(1, 1, 16, 16))
+    assert output.shape == (1, 1, 5)
+
+
 def test_spikformer_backend_propagates_and_aspy_cpu_falls_back():
     model = _tiny_model(backend="aspy").eval()
     nodes = [module for module in model.modules() if isinstance(module, neuron.BaseNode)]
@@ -225,7 +290,7 @@ def test_spikformer_submodule_validation_and_positional_residual():
     )
     with pytest.raises(ValueError, match="patch-stem input"):
         stem(torch.randn(1, 3, 32, 32))
-    with pytest.raises(ValueError, match=r"\[C, H, W\]"):
+    with pytest.raises(ValueError, match="expected patch-stem C=3"):
         stem(torch.randn(2, 1, 1, 32, 32))
 
 
@@ -254,9 +319,7 @@ def test_spikformer_input_validation():
     model = _tiny_model()
     with pytest.raises(ValueError, match="expected 4D image input"):
         model(torch.randn(3, 32, 32))
-    with pytest.raises(ValueError, match=r"\[C, H, W\]"):
+    with pytest.raises(ValueError, match="expected 4D input C=3"):
         model(torch.randn(1, 1, 32, 32))
-    with pytest.raises(ValueError, match=r"\[T, C, H, W\]"):
-        model(torch.randn(3, 1, 3, 32, 32))
-    with pytest.raises(ValueError, match=r"\[T, C, H, W\]"):
-        model(torch.randn(2, 1, 3, 16, 32))
+    with pytest.raises(ValueError, match="expected 5D input C=3"):
+        model(torch.randn(3, 1, 1, 32, 32))

@@ -50,8 +50,11 @@ def install_spikingjelly_alias(*, force: bool = False) -> ModuleType:
     package.activation_based = activation_based
     sys.modules["spikingjelly"] = package
     sys.modules["spikingjelly.activation_based"] = activation_based
-    for name in ("base", "functional", "layer", "neuron", "surrogate"):
+    for name in ("base", "functional", "layer", "model", "neuron", "surrogate"):
         sys.modules[f"spikingjelly.activation_based.{name}"] = getattr(activation_based, name)
+    sys.modules["spikingjelly.activation_based.model.spikformer"] = (
+        activation_based.model.spikformer
+    )
     return package
 
 
@@ -68,7 +71,10 @@ def enable_compat(
     suitable only for a dedicated Ascend process. It is intentionally opt-in.
     """
     global _status
-    alias_enabled = _status.spikingjelly_alias
+    existing_alias = sys.modules.get("spikingjelly")
+    alias_enabled = _status.spikingjelly_alias and bool(
+        getattr(existing_alias, "__spikingjelly_npu_alias__", False)
+    )
     cuda_enabled = _status.cuda_transfer
     reasons: list[str] = []
 

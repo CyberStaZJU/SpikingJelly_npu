@@ -1,6 +1,6 @@
-"""Backward-compatible aliases for the canonical Spikformer implementation."""
+"""Upstream-like activation-based model APIs."""
 
-from ..activation_based.model.spikformer import (
+from .spikformer import (
     Spikformer,
     SpikformerBlock,
     SpikformerConv2dBN,

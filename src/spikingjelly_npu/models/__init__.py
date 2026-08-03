@@ -7,6 +7,8 @@ from .spikformer import (
     SpikformerConv2dBNLIF,
     SpikformerMLP,
     SpikformerPatchStem,
+    spikformer_s,
+    spikformer_ti,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "SpikformerConv2dBNLIF",
     "SpikformerMLP",
     "SpikformerPatchStem",
+    "spikformer_s",
+    "spikformer_ti",
 ]

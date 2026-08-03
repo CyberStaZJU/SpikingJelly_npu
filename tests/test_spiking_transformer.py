@@ -3,7 +3,15 @@ import torch
 from torch import nn
 
 from spikingjelly_npu.activation_based import functional, neuron
-from spikingjelly_npu.activation_based.transformer import SpikingSelfAttention
+from spikingjelly_npu.activation_based.layer import SpikingSelfAttention
+
+
+def test_ssa_legacy_module_is_the_same_canonical_class():
+    from spikingjelly_npu.activation_based.transformer import (
+        SpikingSelfAttention as LegacySpikingSelfAttention,
+    )
+
+    assert LegacySpikingSelfAttention is SpikingSelfAttention
 
 
 def _nonsymmetric_qkv():
