@@ -1,5 +1,5 @@
 {
-  "claim_boundary": "These are small- or tiny-shape FP32 adaptation and component results on the stated stack. They do not establish representative-shape or family-wide acceleration. Standard recurrent, spiking recurrent, and Transformer results are eager compatibility/parity evidence. Spikformer training is not qualified.",
+  "claim_boundary": "These are small- or tiny-shape FP32 adaptation and component results on the stated stack. They do not establish representative-shape, convergence, graph, native Spikformer execution, performance, or family-wide acceleration. Standard recurrent, spiking recurrent, and Transformer results are eager compatibility/parity evidence. SpikingSelfAttention and Spikformer train/eval parity is qualified only when the process explicitly applies configure_npu(allow_conv_hf32=False); the default Conv HF32 policy remains unqualified for the tested Spikformer training gradients.",
   "date": "2026-08-03",
   "evidence": {
     "compact_if_lif": {
@@ -55,15 +55,8 @@
         "atol": 0.0005,
         "rtol": 0.0002
       },
-      "claim": "Tiny-shape eager public output/logit, loss, persistent-buffer, initial-node-state-gradient, and continuous final-state checks passed. End-to-end input gradients and all parameter gradients did not pass, so training, optimizer trajectories, convergence, native execution, and acceleration are unqualified.",
-      "diagnostic_evidence_sha256": {
-        "cpu_authority_batch_norm": "47c061875648864596488a16883b14fbf94e154d36a2490a45ce08ba05130c23",
-        "deterministic_algorithms": "b9b9d73c866a350b0f6d1d7104986ad305194c1186ea0367446f82347005e903",
-        "explicit_npu_batch_norm": "fd804d00cb40a08557acfa7798590849928686db525e14fb66c27c395dba5dd8",
-        "hf32_disable_inconclusive": "043445f7bcbebcd521447ed5550620a6072bb6c5e3036fc7df614613eecd9b29",
-        "localization": "6ace6c97f82bdaafa31b5fe1127d0891222c7b4c4aa62fda3a86a0899271e352"
-      },
-      "localization": {
+      "claim": "With the explicit process-global policy configure_npu(allow_conv_hf32=False), the clean-source tiny-shape eager FP32 matrix passed all 12 SpikingSelfAttention/Spikformer train/eval and full/remainder/singleton cases, including two SGD updates per training case. This is conditional eager parity only; it does not qualify the default Conv HF32 policy, representative shapes, convergence, native Spikformer execution, graph capture, latency, memory, or family-wide acceleration.",
+      "default_conv_hf32_failure": {
         "continuous_final_state_max_abs": 0.00035059452056884766,
         "input_gradient_max_abs": 0.0008228407823480666,
         "input_gradient_mismatches": 32,
@@ -71,17 +64,65 @@
         "output_max_abs": 1.4901161193847656e-08,
         "parameter_gradient_failed_count": 7,
         "parameter_gradient_total_count": 29,
+        "status": "training_gradient_fail",
         "worst_parameter_gradient_max_abs": 0.013298913836479187,
         "worst_parameter_gradient_name": "patch_embed.stages.0.conv_bn.block.0.weight"
       },
-      "interpretation": "Small Conv2d FP32 drift is amplified by training BatchNorm and MaxPool sensitivity. LIF spike outputs were exact and local LIF VJP checks passed. Explicit NPU BatchNorm arithmetic, a diagnostic CPU-authority BatchNorm autograd path, and strict deterministic algorithms did not repair the end-to-end gradients. Disabling Conv HF32 produced no verdict because CANN initialization failed before model execution due a missing tbe Python module.",
-      "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
-      "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
-      "status": "forward_boundary_pass_training_fail",
+      "diagnostic_evidence_sha256": {
+        "cpu_authority_batch_norm": "47c061875648864596488a16883b14fbf94e154d36a2490a45ce08ba05130c23",
+        "default_hf32_localization": "6ace6c97f82bdaafa31b5fe1127d0891222c7b4c4aa62fda3a86a0899271e352",
+        "deterministic_algorithms": "b9b9d73c866a350b0f6d1d7104986ad305194c1186ea0367446f82347005e903",
+        "explicit_npu_batch_norm": "fd804d00cb40a08557acfa7798590849928686db525e14fb66c27c395dba5dd8",
+        "hf32_off_full_preproductization_matrix": "2126ceb9a8851d426d52193b0be62ac13a741a81b0afb9d41a6d9461e1a61522",
+        "hf32_off_localized_valid_probe": "a22d08ad982751cf466a29399369d1ad62d0ab9c8c76413c310404d9e16f5d3e",
+        "hf32_off_old_missing_tbe_invalid_probe": "043445f7bcbebcd521447ed5550620a6072bb6c5e3036fc7df614613eecd9b29"
+      },
+      "explicit_conv_hf32_off_qualification": {
+        "aspy_feasibility_sentinels": "Expected strict pre-launch rejection passed separately for unsupported default Sigmoid surrogate and/or physical format; no native launch was attempted. This is not a native Spikformer qualification.",
+        "build_input_digest_sha256": "5d1e071ba1bd50610957c214576c31c927ee7af84536e350e7c6bd32df1678a2",
+        "build_manifest_sha256": "b7ff9e4e1811875bbc2d544b757a3c8774f8f20873d4884dd58365e84cd5ff26",
+        "build_source_dirty": false,
+        "case_count": 12,
+        "case_pass_count": 12,
+        "configuration_api": "configure_npu(allow_conv_hf32=False)",
+        "conv_allow_hf32": false,
+        "coverage": "SpikingSelfAttention and Spikformer; train and eval; full, remainder, and singleton batches; two SGD updates per training case",
+        "evidence_sha256": "d7f9e133ed3226fd2b8720c2160406e5946bc69cfd2b7ef99917531dc4d5c494",
+        "qualification_harness_sha256": "4e541b3d383bd1863a7bf0c52c6bd3f840797b09ad4a7e40ce34632a205060b7",
+        "run_log_sha256": "ddf6969d5a508103316bbc4bacabe669f24faa962ea6acf64dc88cb00fe817a0",
+        "source_commit": "7cbb7f607034e3b2fe5e1039816beecdc0dbb55e",
+        "source_tree": "e0d080276eb2023063df45d34c89b125fc9b1850",
+        "spikformer_shape": "T=2, B in {4,3,1}, C=3, H=W=32, embed_dims=32, heads=4, depths=1, mlp_ratio=2.0, num_classes=7",
+        "spiking_self_attention_shape": "T=3, B in {4,3,1}, C=8, L=5, heads=2",
+        "status": "pass",
+        "worst_max_abs": {
+          "continuous_node_final_state": 8.940696716308594e-07,
+          "final_state_dict": 3.725290298461914e-09,
+          "initial_node_state_gradient": 1.3038516044616699e-08,
+          "input_gradient": 3.3527612686157227e-08,
+          "optimizer_update": 3.725290298461914e-09,
+          "parameter_gradient": 2.3692846298217773e-06,
+          "public_output": 2.9802322387695312e-08,
+          "state_dict_after_update": 3.725290298461914e-09
+        }
+      },
+      "interpretation": "The historical default-policy failure localized device drift to the Conv2d-to-training-BatchNorm/MaxPool boundary; exact LIF spikes and local LIF VJP were not the cause. Explicit NPU BatchNorm arithmetic, a diagnostic CPU-authority BatchNorm path, and deterministic algorithms did not repair it. The first HF32-off attempt is invalid as parity evidence because PYTHONPATH replacement removed the CANN tbe module before model execution. Repeating the probe with CANN Python paths preserved, then rerunning a clean-source productized matrix through configure_npu(allow_conv_hf32=False), repaired all tested gradient and update gates. The API default remains None and does not mutate process-global Conv precision unless the caller explicitly opts in.",
+      "source_commit": "7cbb7f607034e3b2fe5e1039816beecdc0dbb55e",
+      "source_tree": "e0d080276eb2023063df45d34c89b125fc9b1850",
+      "status": "conditional_training_parity_pass_with_explicit_conv_hf32_off",
       "unchanged_tight_tolerance": {
         "atol": 0.00002,
         "rtol": 0.0002
-      }
+      },
+      "unqualified": [
+        "default_conv_hf32_spikformer_training_gradients",
+        "representative_shapes",
+        "convergence",
+        "native_spikformer_execution",
+        "spikformer_graph_capture",
+        "latency_or_memory_improvement",
+        "family_wide_acceleration"
+      ]
     },
     "spiking_recurrent": {
       "case_count": 18,

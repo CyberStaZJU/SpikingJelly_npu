@@ -95,10 +95,15 @@ device = configure_npu(
     "npu:7",
     jit_compile=False,
     allow_internal_format=False,
+    allow_conv_hf32=False,  # required by the qualified tiny Spikformer parity path
 )
 ```
 
-`jit_compile=False` selects binary ACLNN/opapi operators in torch-npu 2.9, while `allow_internal_format=False` prevents legacy internal-format ACLop kernels such as Conv2D from being selected during NPUGraph capture. In the qualified 2.9 runtime the latter is a write-only property, so it must be assigned directly rather than tested with `hasattr`. The package changes neither option at import time; `configure_npu` applies them explicitly before model/tensor creation.
+`jit_compile=False` selects binary ACLNN/opapi operators in torch-npu 2.9, while `allow_internal_format=False` prevents legacy internal-format ACLop kernels such as Conv2D from being selected during NPUGraph capture. In the qualified 2.9 runtime the latter is a write-only property, so it must be assigned directly rather than tested with `hasattr`.
+
+`allow_conv_hf32` controls torch-npu's process-global Conv HF32 policy only when explicitly supplied. Its default is `None`, which preserves the process's existing setting. The helper applies an explicit Conv policy after device selection, reads it back, and raises if the setting is unavailable or was not retained. Package import and model construction do not mutate this policy.
+
+Tiny-shape SpikingSelfAttention/Spikformer FP32 train/eval parity was qualified with `allow_conv_hf32=False`: all 12 train/eval × full/remainder/singleton cases passed, including two SGD updates per training case. The same localized Spikformer training path failed tight input- and parameter-gradient gates under the default Conv HF32 policy. This does not establish representative-shape, convergence, native Spikformer, graph, or performance qualification, and callers should not assume that changing Conv HF32 is universally preferable for unrelated models.
 
 ## NPUGraph constraints
 
