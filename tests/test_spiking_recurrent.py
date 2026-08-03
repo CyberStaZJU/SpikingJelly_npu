@@ -502,6 +502,29 @@ def test_persistent_dtype_mismatch_instructs_reset(module_type, kwargs):
         module(torch.randn(2, 2, 2, dtype=torch.double))
 
 
+@pytest.mark.parametrize(("module_type", "kwargs"), SEQUENCE_CASES)
+def test_stateful_runtime_state_follows_module_dtype_conversion(module_type, kwargs):
+    module = module_type(2, 3, stateful=True, **kwargs).double()
+    module(torch.randn(2, 2, 2, dtype=torch.double))
+
+    module.float()
+
+    assert all(value.dtype == torch.float32 for value in _state_tensors(module.hx))
+    output, state = module(torch.randn(2, 2, 2, dtype=torch.float32))
+    assert output.dtype == torch.float32
+    assert all(value.dtype == torch.float32 for value in _state_tensors(state))
+
+
+@pytest.mark.parametrize(("module_type", "kwargs"), SEQUENCE_CASES)
+def test_sequence_modules_are_multi_step_only(module_type, kwargs):
+    module = module_type(2, 3, **kwargs)
+
+    assert module.step_mode == "m"
+    assert module.supported_step_mode() == ("m",)
+    with pytest.raises(ValueError, match="step_mode"):
+        module.step_mode = "s"
+
+
 def test_dropout_occurs_only_between_layers_and_is_seed_deterministic(monkeypatch):
     calls = []
     original_dropout = F.dropout

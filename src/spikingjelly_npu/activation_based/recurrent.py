@@ -310,6 +310,7 @@ class _SpikingRecurrentBase(base.MemoryModule):
         dtype=None,
     ) -> None:
         super().__init__()
+        self.step_mode = "m"
         self._validate_constructor(
             input_size,
             hidden_size,
@@ -442,9 +443,19 @@ class _SpikingRecurrentBase(base.MemoryModule):
         elif isinstance(self.hx, Tensor):
             self.hx = self.hx.detach()
 
+    def supported_step_mode(self) -> tuple[str, ...]:
+        return ("m",)
+
     @property
     def supported_backends(self) -> tuple[str, ...]:
         return ("torch",)
+
+    def _apply(self, fn):
+        if isinstance(self.hx, tuple):
+            self.hx = tuple(fn(value) for value in self.hx)
+        elif isinstance(self.hx, Tensor):
+            self.hx = fn(self.hx)
+        return nn.Module._apply(self, fn)
 
     @property
     def all_weights(self) -> list[list[Tensor]]:
