@@ -54,7 +54,7 @@ The frozen hotspot gate required either at least `1.25×` speedup, or at least `
 3. Capture repeated fixed-shape full batches with NPUGraph only where actual-shape capture is separately qualified.
 4. Keep diagnostics eager; use the qualified stateless decay-LIF for FedSNN remainder batches, while generic graph remainders stay eager.
 5. Keep explicit host synchronization outside the model hot path and use it only at measurement or correctness boundaries.
-6. Qualify FP16 AMP separately; AsPy is FP32-only in this release.
+6. Qualify BF16 mixed precision separately. AsPy's native ABI remains FP32; BF16 public tensors incur an explicit FP32-island conversion whose bytes, latency, and HBM effect must be reported. Do not call this BF16-native execution.
 
 ## Packed-model benchmark
 

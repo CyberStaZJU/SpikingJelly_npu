@@ -1,4 +1,3 @@
-
 import json
 from types import SimpleNamespace
 
@@ -187,9 +186,7 @@ def test_aspy_common_scalar_validation_is_explicit(threshold, reset, alpha, matc
         ("klif", float("nan"), "finite fixed float tau greater than 1"),
     ],
 )
-def test_aspy_invalid_tau_rejects_before_extension_loading(
-    monkeypatch, kind, value, match
-):
+def test_aspy_invalid_tau_rejects_before_extension_loading(monkeypatch, kind, value, match):
     load_calls = []
     monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(_aspy, "_load_extension", lambda: load_calls.append(True))
@@ -302,6 +299,8 @@ def test_aspy_route_exact_serialization_is_additive_and_script_compatible():
         "bucket": None,
         "native_region": "if",
         "format_conversion": None,
+        "dtype_conversion": None,
+        "dtype_conversion_bytes": None,
         "route_schema_version": _aspy.ASPY_ROUTE_SCHEMA_VERSION,
     }
     serialized = route.__dict__
@@ -312,12 +311,278 @@ def test_aspy_route_exact_serialization_is_additive_and_script_compatible():
     assert route.to_dict() == {
         key: value
         for key, value in expected.items()
-        if key
-        not in {"requested_backend", "backend", "training", "route_schema_version"}
+        if key not in {"requested_backend", "backend", "training", "route_schema_version"}
     }
 
     serialized["reason"] = "local mutation"
     assert route.reason == "Ascend C fused multi-step IF kernel"
+
+
+def test_aspy_bf16_if_uses_fp32_native_island_and_public_dtype(monkeypatch):
+    node = neuron.IFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(3, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+    calls = []
+
+    def implementation(x_seq, v_init, *args):
+        calls.append((x_seq, v_init, args))
+        assert x_seq.dtype == torch.float32
+        assert v_init.dtype == torch.float32
+        return (
+            x_seq * 0.0 + 1.0,
+            v_init * 0.0 + 0.25,
+            x_seq * 0.0 + 0.25,
+        )
+
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (SimpleNamespace(if_multi_step=implementation), None),
+    )
+
+    output = node(x)
+    (output.float().sum() + node.v.sum() + node.v_seq.sum()).backward()
+
+    assert len(calls) == 1
+    assert output.dtype == torch.bfloat16
+    assert node.v.dtype == torch.float32
+    assert node.v_seq.dtype == torch.float32
+    assert x.grad is not None and x.grad.dtype == torch.bfloat16
+    assert node.last_backend_route.backend == "aspy"
+    assert node.last_backend_route.dtype_conversion == "bf16-public-fp32-aspy-island"
+    expected_bytes = 2 * x.numel() * (2 + 4)
+    assert node.last_backend_route.dtype_conversion_bytes == expected_bytes
+
+
+def test_aspy_bf16_plif_and_klif_keep_master_scalars_fp32(monkeypatch):
+    cases = (
+        (
+            neuron.ParametricLIFNode(
+                backend="aspy",
+                backend_strict=True,
+                step_mode="m",
+                store_v_seq=True,
+                surrogate_function=surrogate.ATan(),
+            ),
+            "plif_multi_step",
+            "w",
+        ),
+        (
+            neuron.KLIFNode(
+                backend="aspy",
+                backend_strict=True,
+                step_mode="m",
+                store_v_seq=True,
+                surrogate_function=surrogate.ATan(),
+            ),
+            "klif_multi_step",
+            "k",
+        ),
+    )
+    for node, symbol, parameter_name in cases:
+        x = torch.zeros(3, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+        seen = []
+
+        def implementation(x_seq, v_init, scalar, *args, seen=seen):
+            seen.append((x_seq.dtype, v_init.dtype, scalar.dtype))
+            scalar_term = scalar.reshape(()).to(dtype=torch.float32) * 0.0
+            return (
+                x_seq * 0.0 + scalar_term + 1.0,
+                v_init * 0.0 + scalar_term + 0.25,
+                x_seq * 0.0 + scalar_term + 0.25,
+            )
+
+        monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+        monkeypatch.setattr(
+            _aspy,
+            "_load_extension",
+            lambda symbol=symbol, implementation=implementation: (
+                SimpleNamespace(**{symbol: implementation}),
+                None,
+            ),
+        )
+
+        output = node(x)
+        (output.float().sum() + node.v.sum()).backward()
+
+        assert seen == [(torch.float32, torch.float32, torch.float32)]
+        assert output.dtype == torch.bfloat16
+        assert node.v.dtype == torch.float32
+        assert node.v_seq.dtype == torch.float32
+        parameter = getattr(node, parameter_name)
+        assert parameter.dtype == torch.float32
+        assert parameter.grad is not None and parameter.grad.dtype == torch.float32
+        assert x.grad is not None and x.grad.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        neuron.IFNode(backend="aspy", step_mode="s", surrogate_function=surrogate.ATan()),
+        neuron.LIFNode(backend="aspy", step_mode="s", surrogate_function=surrogate.ATan()),
+        neuron.ParametricLIFNode(
+            backend="aspy", step_mode="s", surrogate_function=surrogate.ATan()
+        ),
+        neuron.KLIFNode(backend="aspy", step_mode="s", surrogate_function=surrogate.ATan()),
+    ],
+)
+def test_aspy_bf16_single_step_fallback_preserves_public_dtype(node):
+    x = torch.full((2, 4), 0.5, dtype=torch.bfloat16, requires_grad=True)
+
+    output = node(x)
+    output.float().sum().backward()
+
+    assert output.dtype == torch.bfloat16
+    assert node.v.dtype == torch.float32
+    assert x.grad is not None and x.grad.dtype == torch.bfloat16
+    parameter = getattr(node, "w", getattr(node, "k", None))
+    if parameter is not None:
+        assert parameter.dtype == torch.float32
+        assert parameter.grad is not None and parameter.grad.dtype == torch.float32
+
+
+@pytest.mark.parametrize(
+    ("node", "parameter_name"),
+    [
+        (
+            neuron.ParametricLIFNode(
+                backend="aspy",
+                step_mode="m",
+                store_v_seq=True,
+                surrogate_function=surrogate.ATan(),
+            ),
+            "w",
+        ),
+        (
+            neuron.KLIFNode(
+                backend="aspy",
+                step_mode="m",
+                store_v_seq=True,
+                surrogate_function=surrogate.ATan(),
+            ),
+            "k",
+        ),
+    ],
+)
+def test_aspy_module_bf16_conversion_preserves_fp32_master_and_state(node, parameter_name):
+    node.v = torch.full((2, 4), 0.375, dtype=torch.float32)
+    node.v_seq = torch.full((3, 2, 4), 0.25, dtype=torch.float32)
+
+    node.to(dtype=torch.bfloat16)
+
+    parameter = getattr(node, parameter_name)
+    assert parameter.dtype == torch.float32
+    assert node.v.dtype == torch.float32
+    assert node.v_seq.dtype == torch.float32
+
+
+def test_aspy_bf16_strict_rejection_restores_existing_runtime_state(monkeypatch):
+    node = neuron.LIFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    node.v = torch.full((2, 4), 0.375, dtype=torch.float32)
+    node.v_seq = torch.full((2, 2, 4), 0.25, dtype=torch.float32)
+    original_v = node.v
+    original_v_seq = node.v_seq
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: (None, "missing bundle"))
+
+    with pytest.raises(_aspy.AsPyBackendError):
+        node(torch.zeros(3, 1, 4, dtype=torch.bfloat16))
+
+    assert node.v is original_v
+    assert node.v_seq is original_v_seq
+    torch.testing.assert_close(node.v, torch.full((2, 4), 0.375))
+    torch.testing.assert_close(node.v_seq, torch.full((2, 2, 4), 0.25))
+
+
+def test_aspy_bf16_plif_fallback_keeps_fp32_scalar_recurrence(monkeypatch):
+    node = neuron.ParametricLIFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.full((3, 2, 4), 0.5, dtype=torch.bfloat16, requires_grad=True)
+    seen = []
+    original_charge = node.neuronal_charge
+
+    def inspect_charge(step):
+        seen.append(node.w.sigmoid().to(device=step.device).dtype)
+        return original_charge(step)
+
+    monkeypatch.setattr(node, "neuronal_charge", inspect_charge)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: (None, "missing bundle"))
+
+    output = node(x)
+    output.float().sum().backward()
+
+    assert seen == [torch.float32] * x.shape[0]
+    assert output.dtype == torch.bfloat16
+    assert node.v.dtype == torch.float32
+    assert node.v_seq.dtype == torch.float32
+    assert node.w.dtype == torch.float32
+    assert node.w.grad is not None and node.w.grad.dtype == torch.float32
+
+
+def test_aspy_bf16_strict_missing_bundle_preserves_conversion_route(monkeypatch):
+    node = neuron.IFNode(
+        backend="aspy",
+        backend_strict=True,
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(3, 2, 4, dtype=torch.bfloat16)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: (None, "missing bundle"))
+
+    with pytest.raises(_aspy.AsPyBackendError) as error_info:
+        node(x)
+
+    route = error_info.value.route
+    assert route.native_launch_attempted is False
+    assert route.dtype_conversion == "bf16-public-fp32-aspy-island"
+    assert route.dtype_conversion_bytes == 2 * x.numel() * (2 + 4)
+
+
+def test_aspy_bf16_prelaunch_fallback_preserves_public_and_state_dtypes(monkeypatch):
+    node = neuron.LIFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.full((3, 2, 4), 0.5, dtype=torch.bfloat16, requires_grad=True)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(_aspy, "_load_extension", lambda: (None, "missing bundle"))
+
+    output = node(x)
+    output.float().sum().backward()
+
+    assert output.dtype == torch.bfloat16
+    assert node.v.dtype == torch.float32
+    assert node.v_seq.dtype == torch.float32
+    assert x.grad is not None and x.grad.dtype == torch.bfloat16
+    assert node.last_backend_route.backend == "torch"
+    assert node.last_backend_route.dtype_conversion == "bf16-public-fp32-aspy-island"
+    assert node.last_backend_route.dtype_conversion_bytes is not None
 
 
 def test_aspy_route_fallback_serialization_preserves_historical_values():
@@ -353,9 +618,7 @@ def test_aspy_commits_validated_extension_result(monkeypatch):
         _aspy,
         "_load_extension",
         lambda: (
-            SimpleNamespace(
-                if_multi_step=lambda *args: (spike_seq, v_final, v_seq)
-            ),
+            SimpleNamespace(if_multi_step=lambda *args: (spike_seq, v_final, v_seq)),
             None,
         ),
     )
@@ -526,8 +789,7 @@ def test_aspy_lif_commits_validated_extension_result(monkeypatch):
         "_load_extension",
         lambda: (
             SimpleNamespace(
-                lif_multi_step=lambda *args: calls.append(args)
-                or (spike_seq, v_final, v_seq)
+                lif_multi_step=lambda *args: calls.append(args) or (spike_seq, v_final, v_seq)
             ),
             None,
         ),
@@ -570,14 +832,12 @@ def test_aspy_malformed_extension_result_does_not_commit_state(monkeypatch):
     with pytest.raises(ValueError, match="spike_seq shape mismatch"):
         node(x)
 
-    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v == 0.0
     assert node.v_seq is None
 
 
 @pytest.mark.parametrize("malformed_name", ["spike_seq", "v_final", "v_seq"])
-def test_aspy_malformed_result_layout_does_not_commit_state(
-    monkeypatch, malformed_name
-):
+def test_aspy_malformed_result_layout_does_not_commit_state(monkeypatch, malformed_name):
     node = neuron.IFNode(
         backend="aspy",
         step_mode="m",
@@ -594,9 +854,7 @@ def test_aspy_malformed_result_layout_does_not_commit_state(
         outputs[malformed_name] = torch.ones(2, 8)[:, ::2]
     else:
         outputs[malformed_name] = torch.ones(3, 2, 8)[:, :, ::2]
-    assert outputs[malformed_name].shape == (
-        x[0].shape if malformed_name == "v_final" else x.shape
-    )
+    assert outputs[malformed_name].shape == (x[0].shape if malformed_name == "v_final" else x.shape)
     assert not outputs[malformed_name].is_contiguous()
     monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -617,7 +875,7 @@ def test_aspy_malformed_result_layout_does_not_commit_state(
     with pytest.raises(ValueError, match="contiguous with storage offset zero"):
         node(x)
 
-    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v == 0.0
     assert node.v_seq is None
 
 
@@ -646,9 +904,7 @@ def test_aspy_malformed_result_physical_format_does_not_commit_state(monkeypatch
         _aspy,
         "_load_extension",
         lambda: (
-            SimpleNamespace(
-                if_multi_step=lambda *args: (spike_seq, v_final, v_seq)
-            ),
+            SimpleNamespace(if_multi_step=lambda *args: (spike_seq, v_final, v_seq)),
             None,
         ),
     )
@@ -656,7 +912,7 @@ def test_aspy_malformed_result_physical_format_does_not_commit_state(monkeypatch
     with pytest.raises(ValueError, match="v_final is not bridge-safe"):
         node(x)
 
-    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v == 0.0
     assert node.v_seq is None
 
 
@@ -687,7 +943,7 @@ def test_aspy_lif_malformed_extension_result_does_not_commit_state(monkeypatch):
     with pytest.raises(ValueError, match="spike_seq shape mismatch"):
         node(x)
 
-    torch.testing.assert_close(node.v, torch.zeros_like(x[0]))
+    assert node.v == 0.0
     assert node.v_seq is None
 
 
@@ -757,9 +1013,7 @@ def test_aspy_plif_strict_cpu_rejection_and_single_step_fallback(monkeypatch):
 
 @pytest.mark.parametrize("scale_reset", [False, True])
 @pytest.mark.parametrize("decay_input", [False, True])
-def test_klif_single_multi_reset_state_and_first_order_gradients(
-    scale_reset, decay_input
-):
+def test_klif_single_multi_reset_state_and_first_order_gradients(scale_reset, decay_input):
     kwargs = {
         "scale_reset": scale_reset,
         "tau": 2.5,
@@ -775,9 +1029,7 @@ def test_klif_single_multi_reset_state_and_first_order_gradients(
     single.load_state_dict(multi.state_dict())
     assert tuple(multi.state_dict()) == ("k",)
 
-    x_multi = torch.tensor(
-        [[[0.4, -0.2]], [[0.6, 0.5]], [[0.3, 0.8]]], requires_grad=True
-    )
+    x_multi = torch.tensor([[[0.4, -0.2]], [[0.6, 0.5]], [[0.3, 0.8]]], requires_grad=True)
     initial_v = torch.tensor([[0.1, -0.1]], requires_grad=True)
     multi.v = initial_v
     single.v = initial_v.detach().clone().requires_grad_(True)
@@ -917,9 +1169,7 @@ def test_aspy_klif_old_bundle_falls_back_or_strictly_errors(monkeypatch):
         "_load_extension",
         lambda: (SimpleNamespace(lif_multi_step=lambda *args: None), None),
     )
-    fallback = neuron.KLIFNode(
-        backend="aspy", step_mode="m", surrogate_function=surrogate.ATan()
-    )
+    fallback = neuron.KLIFNode(backend="aspy", step_mode="m", surrogate_function=surrogate.ATan())
     output = fallback(torch.zeros(2, 1, 1))
     assert output.shape == (2, 1, 1)
     assert fallback.last_backend_route.backend == "torch"
@@ -953,8 +1203,7 @@ def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
         "_load_extension",
         lambda: (
             SimpleNamespace(
-                klif_multi_step=lambda *args: calls.append(args)
-                or (spike_seq, v_final, v_seq)
+                klif_multi_step=lambda *args: calls.append(args) or (spike_seq, v_final, v_seq)
             ),
             None,
         ),
@@ -968,9 +1217,7 @@ def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
     assert node.last_backend_route.backend == "aspy"
     assert "KLIF" in node.last_backend_route.reason
 
-    failing = neuron.KLIFNode(
-        backend="aspy", step_mode="m", surrogate_function=surrogate.ATan()
-    )
+    failing = neuron.KLIFNode(backend="aspy", step_mode="m", surrogate_function=surrogate.ATan())
     monkeypatch.setattr(
         _aspy,
         "_load_extension",
@@ -983,9 +1230,10 @@ def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
             None,
         ),
     )
+    original_failing_v = failing.v
     with pytest.raises(RuntimeError, match="native KLIF launch failed"):
         failing(x)
-    torch.testing.assert_close(failing.v, torch.zeros_like(x[0]))
+    assert failing.v is original_failing_v
 
     malformed = neuron.KLIFNode(
         backend="aspy",
@@ -999,16 +1247,106 @@ def test_aspy_klif_transaction_and_native_failure_propagation(monkeypatch):
         lambda: (
             SimpleNamespace(
                 klif_multi_step=lambda *args: (
-                    torch.ones(1), torch.ones_like(x[0]), torch.ones_like(x)
+                    torch.ones(1),
+                    torch.ones_like(x[0]),
+                    torch.ones_like(x),
                 )
             ),
             None,
         ),
     )
+    original_malformed_v = malformed.v
+    original_malformed_v_seq = malformed.v_seq
     with pytest.raises(ValueError, match="spike_seq shape mismatch"):
         malformed(x)
-    torch.testing.assert_close(malformed.v, torch.zeros_like(x[0]))
-    assert malformed.v_seq is None
+    assert malformed.v is original_malformed_v
+    assert malformed.v_seq is original_malformed_v_seq
+
+
+def test_aspy_native_input_mutation_cannot_corrupt_committed_state(monkeypatch):
+    node = neuron.LIFNode(
+        backend="aspy",
+        step_mode="m",
+        store_v_seq=True,
+        surrogate_function=surrogate.ATan(),
+    )
+    node.v = torch.full((2, 4), 0.375)
+    node.v_seq = torch.full((3, 2, 4), 0.25)
+    original_v = node.v
+    original_v_seq = node.v_seq
+
+    def implementation(x_seq, v_init, *args):
+        v_init.add_(10.0)
+        raise RuntimeError("native input mutation then failure")
+
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_aspy, "_require_npu_nd", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (SimpleNamespace(lif_multi_step=implementation), None),
+    )
+
+    with pytest.raises(RuntimeError, match="native input mutation then failure"):
+        node(torch.zeros(3, 2, 4))
+
+    assert node.v is original_v
+    assert node.v_seq is original_v_seq
+    torch.testing.assert_close(node.v, torch.full((2, 4), 0.375))
+    torch.testing.assert_close(node.v_seq, torch.full((3, 2, 4), 0.25))
+
+
+@pytest.mark.parametrize(
+    ("node", "parameter_name"),
+    [
+        (
+            neuron.ParametricLIFNode(
+                backend="torch",
+                step_mode="m",
+                surrogate_function=surrogate.ATan(),
+            ),
+            "w",
+        ),
+        (
+            neuron.KLIFNode(
+                backend="torch",
+                step_mode="m",
+                surrogate_function=surrogate.ATan(),
+            ),
+            "k",
+        ),
+    ],
+)
+def test_aspy_backend_switch_rejects_non_fp32_master_parameter(
+    monkeypatch, node, parameter_name
+):
+    node.to(dtype=torch.bfloat16)
+    assert getattr(node, parameter_name).dtype == torch.bfloat16
+    optimizer = torch.optim.Adam(node.parameters(), lr=0.01)
+    parameter = getattr(node, parameter_name)
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    assert any(
+        isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16
+        for value in optimizer.state[parameter].values()
+    )
+
+    node.backend = "aspy"
+    x = torch.zeros(3, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+    loaded = []
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: loaded.append(True) or (SimpleNamespace(), None),
+    )
+
+    with pytest.raises(RuntimeError, match="recreate the optimizer"):
+        node(x)
+
+    assert loaded == []
+    assert parameter.dtype == torch.bfloat16
+    assert node.v == 0.0
 
 
 def test_aspy_plif_commits_only_validated_transactional_state(monkeypatch):
@@ -1029,8 +1367,7 @@ def test_aspy_plif_commits_only_validated_transactional_state(monkeypatch):
         "_load_extension",
         lambda: (
             SimpleNamespace(
-                plif_multi_step=lambda *args: calls.append(args)
-                or (spike_seq, v_final, v_seq)
+                plif_multi_step=lambda *args: calls.append(args) or (spike_seq, v_final, v_seq)
             ),
             None,
         ),
@@ -1068,7 +1405,9 @@ def test_aspy_plif_commits_only_validated_transactional_state(monkeypatch):
             None,
         ),
     )
+    original_malformed_v = malformed.v
+    original_malformed_v_seq = malformed.v_seq
     with pytest.raises(ValueError, match="spike_seq shape mismatch"):
         malformed(x)
-    torch.testing.assert_close(malformed.v, torch.zeros_like(x[0]))
-    assert malformed.v_seq is None
+    assert malformed.v is original_malformed_v
+    assert malformed.v_seq is original_malformed_v_seq

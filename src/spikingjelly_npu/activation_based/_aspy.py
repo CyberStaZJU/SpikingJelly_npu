@@ -30,13 +30,13 @@ from spikingjelly_npu.routing import (
 
 from . import surrogate
 
-ASPY_ROUTE_SCHEMA_VERSION = 2
+ASPY_ROUTE_SCHEMA_VERSION = 3
 
 
 class AsPyRoute(ProviderRoute):
     """Backward-compatible name for an observable provider route.
 
-    ``ASPY_ROUTE_SCHEMA_VERSION == 2`` defines the additive ``__dict__`` payload.
+    ``ASPY_ROUTE_SCHEMA_VERSION == 3`` defines the additive ``__dict__`` payload.
     The inherited ``requested_backend``, ``backend``, and ``training`` properties
     preserve the old API. ``__dict__`` is an additive serialization view: it keeps
     those historical keys while retaining every immutable :class:`ProviderRoute`
@@ -63,6 +63,16 @@ class AsPyIFResult:
     spike_seq: torch.Tensor
     v_final: torch.Tensor
     v_seq: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class _AsPyPrecisionPlan:
+    """Public/native dtype contract for one AsPy request."""
+
+    public_dtype: torch.dtype
+    native_dtype: torch.dtype
+    dtype_conversion: str | None
+    dtype_conversion_bytes: int
 
 
 class AsPyBackendError(RuntimeError):
@@ -177,6 +187,8 @@ def eager_route(
     abi_version: int | None = None,
     schema_version: int | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> AsPyRoute:
     """Return an executed PyTorch route using the shared provider contract."""
 
@@ -190,6 +202,8 @@ def eager_route(
         abi_version=abi_version,
         schema_version=schema_version,
         format_conversion=format_conversion,
+        dtype_conversion=dtype_conversion,
+        dtype_conversion_bytes=dtype_conversion_bytes,
     )
     return _route(**route.to_dict())
 
@@ -202,6 +216,8 @@ def native_route(
     strict: bool = False,
     training: bool = False,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> AsPyRoute:
     """Return an executed native route after one implementation call succeeded."""
 
@@ -230,6 +246,8 @@ def native_route(
         schema_version=None if capabilities is None else capabilities.schema_version,
         native_region=native_region,
         format_conversion=format_conversion,
+        dtype_conversion=dtype_conversion,
+        dtype_conversion_bytes=dtype_conversion_bytes,
     )
     return _route(**route.to_dict())
 
@@ -243,6 +261,8 @@ def _strict_rejection(
     requested_backend: str = "aspy",
     capabilities: AsPyCapabilities | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> NoReturn:
     try:
         strict_pre_execution_rejection(
@@ -255,6 +275,8 @@ def _strict_rejection(
             schema_version=None if capabilities is None else capabilities.schema_version,
             native_region=capability,
             format_conversion=format_conversion,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
     except StrictProviderError as error:
         raise AsPyBackendError(_route(**error.route.to_dict())) from error
@@ -270,6 +292,8 @@ def _fallback_or_reject(
     requested_backend: str = "aspy",
     capabilities: AsPyCapabilities | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> tuple[None, AsPyRoute]:
     if strict:
         _strict_rejection(
@@ -280,6 +304,8 @@ def _fallback_or_reject(
             requested_backend=requested_backend,
             capabilities=capabilities,
             format_conversion=format_conversion,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
     return None, eager_route(
         requested_backend,
@@ -291,6 +317,8 @@ def _fallback_or_reject(
         abi_version=None if capabilities is None else capabilities.abi_version,
         schema_version=None if capabilities is None else capabilities.schema_version,
         format_conversion=format_conversion,
+        dtype_conversion=dtype_conversion,
+        dtype_conversion_bytes=dtype_conversion_bytes,
     )
 
 
@@ -308,12 +336,82 @@ def _unsupported_scalar_reason(
         return "AsPy requires a finite v_threshold"
     if v_reset is not None and not math.isfinite(v_reset):
         return "AsPy requires a finite v_reset"
-    if (
-        not math.isfinite(surrogate_function.alpha)
-        or surrogate_function.alpha <= 0.0
-    ):
+    if not math.isfinite(surrogate_function.alpha) or surrogate_function.alpha <= 0.0:
         return "AsPy requires finite positive ATan alpha"
     return None
+
+
+def _supported_public_dtype_reason(tensor: torch.Tensor) -> str | None:
+    if tensor.dtype not in {torch.float32, torch.bfloat16}:
+        return (
+            "AsPy supports torch.float32 or torch.bfloat16 public tensors; "
+            f"got dtype={tensor.dtype}"
+        )
+    return None
+
+
+def _precision_plan(
+    public_tensor: torch.Tensor,
+    *fp32_native_inputs: torch.Tensor,
+) -> _AsPyPrecisionPlan:
+    if public_tensor.dtype == torch.float32:
+        return _AsPyPrecisionPlan(torch.float32, torch.float32, None, 0)
+    fp32_bytes = torch.empty((), dtype=torch.float32).element_size()
+    conversion_bytes = sum(
+        tensor.numel() * (tensor.element_size() + fp32_bytes)
+        for tensor in (public_tensor, *fp32_native_inputs)
+        if tensor.dtype != torch.float32
+    )
+    # This field estimates forward boundary traffic only. Training backward
+    # cast traffic is measured separately by end-to-end profilers rather than
+    # predicted by the immutable forward route record.
+    # The public spike sequence crosses the same boundary in the opposite
+    # direction after the FP32 native recurrence completes.
+    conversion_bytes += public_tensor.numel() * (fp32_bytes + public_tensor.element_size())
+    return _AsPyPrecisionPlan(
+        public_dtype=torch.bfloat16,
+        native_dtype=torch.float32,
+        dtype_conversion="bf16-public-fp32-aspy-island",
+        dtype_conversion_bytes=conversion_bytes,
+    )
+
+
+def _to_native_fp32(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dtype == torch.float32:
+        return tensor
+    return tensor.to(dtype=torch.float32).contiguous()
+
+
+def _public_result(
+    result: AsPyIFResult,
+    plan: _AsPyPrecisionPlan,
+) -> AsPyIFResult:
+    if plan.public_dtype == plan.native_dtype:
+        return result
+    return AsPyIFResult(
+        spike_seq=result.spike_seq.to(dtype=plan.public_dtype).contiguous(),
+        v_final=result.v_final,
+        v_seq=result.v_seq,
+    )
+
+
+def _prepare_stateful_native_inputs(
+    x_seq: torch.Tensor,
+    v_init: torch.Tensor,
+) -> tuple[_AsPyPrecisionPlan, torch.Tensor, torch.Tensor, str | None]:
+    plan = _precision_plan(x_seq, v_init)
+    native_x_seq = _to_native_fp32(x_seq)
+    native_v_init = _to_native_fp32(v_init)
+    for name, tensor in (("input", native_x_seq), ("initial voltage", native_v_init)):
+        format_reason = _require_npu_nd(tensor)
+        if format_reason is not None:
+            return (
+                plan,
+                native_x_seq,
+                native_v_init,
+                f"AsPy converted {name} is not bridge-safe: {format_reason}",
+            )
+    return plan, native_x_seq, native_v_init, None
 
 
 def _unsupported_reason(
@@ -326,14 +424,20 @@ def _unsupported_reason(
 ) -> str | None:
     if x_seq.device.type != "npu":
         return f"AsPy requires an NPU tensor, got device={x_seq.device.type}"
-    if x_seq.dtype != torch.float32:
-        return f"AsPy currently requires torch.float32, got dtype={x_seq.dtype}"
+    dtype_reason = _supported_public_dtype_reason(x_seq)
+    if dtype_reason is not None:
+        return dtype_reason
     if x_seq.shape[0] == 0:
         return "AsPy requires at least one time step"
     if not x_seq.is_contiguous() or x_seq.storage_offset() != 0:
         return "AsPy currently requires contiguous input with storage offset zero"
-    if v_init.device != x_seq.device or v_init.dtype != x_seq.dtype:
-        return "AsPy initial voltage must match the input device and dtype"
+    if v_init.device != x_seq.device:
+        return "AsPy initial voltage must match the input device"
+    if v_init.dtype not in {x_seq.dtype, torch.float32}:
+        return (
+            "AsPy initial voltage must match the public input dtype or use the "
+            "qualified FP32 state dtype"
+        )
     if not v_init.is_contiguous() or v_init.storage_offset() != 0:
         return "AsPy initial voltage must be contiguous with storage offset zero"
     if v_init.shape != x_seq.shape[1:]:
@@ -358,8 +462,9 @@ def _unsupported_stateless_reason(
 ) -> str | None:
     if current_seq.device.type != "npu":
         return f"AsPy requires an NPU tensor, got device={current_seq.device.type}"
-    if current_seq.dtype != torch.float32:
-        return f"AsPy currently requires torch.float32, got dtype={current_seq.dtype}"
+    dtype_reason = _supported_public_dtype_reason(current_seq)
+    if dtype_reason is not None:
+        return dtype_reason
     if current_seq.shape[0] == 0:
         return "AsPy requires at least one time step"
     if current_seq[0].numel() == 0:
@@ -400,10 +505,7 @@ def _require_npu_nd(tensor: torch.Tensor) -> str | None:
     if error is not None:
         return error
     if source_value is not None and source_value != 2:
-        return (
-            "AsPy native bridge requires physical ACL_FORMAT_ND (2), "
-            f"got format={source_value}"
-        )
+        return f"AsPy native bridge requires physical ACL_FORMAT_ND (2), got format={source_value}"
     return None
 
 
@@ -453,10 +555,7 @@ def _adapter_capabilities(module: object) -> AsPyCapabilities:
         # The loaded native object is authoritative. In particular, do not turn
         # malformed or partial declared metadata into an inferred adapter success.
         return probe_aspy_capabilities(native)
-    if any(
-        hasattr(module, name)
-        for name in ("aspy_abi_version", "aspy_capabilities")
-    ):
+    if any(hasattr(module, name) for name in ("aspy_abi_version", "aspy_capabilities")):
         return capabilities
     adapter_groups = {
         "if": ("if_multi_step",),
@@ -474,14 +573,8 @@ def _adapter_capabilities(module: object) -> AsPyCapabilities:
         type(
             "_LegacyAdapterCapabilities",
             (),
-            {
-                f"{name}_forward": value
-                for name, value in symbols.items()
-            }
-            | {
-                f"{name}_backward": value
-                for name, value in symbols.items()
-            },
+            {f"{name}_forward": value for name, value in symbols.items()}
+            | {f"{name}_backward": value for name, value in symbols.items()},
         )()
     )
 
@@ -516,6 +609,8 @@ def _load_for_capability(
     training: bool,
     adapter_symbol: str,
     requested_backend: str = "aspy",
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> tuple[ModuleType | None, AsPyCapabilities, AsPyRoute | None]:
     loaded = _normalize_loaded(_load_extension())
     capabilities = loaded.capabilities
@@ -528,6 +623,8 @@ def _load_for_capability(
             training=training,
             requested_backend=requested_backend,
             capabilities=capabilities,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
         return None, capabilities, route
     implementation = getattr(loaded.module, adapter_symbol, None)
@@ -540,6 +637,8 @@ def _load_for_capability(
             training=training,
             requested_backend=requested_backend,
             capabilities=capabilities,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
         return None, capabilities, route
     if not capabilities.supports(capability):
@@ -554,6 +653,8 @@ def _load_for_capability(
             training=training,
             requested_backend=requested_backend,
             capabilities=capabilities,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
         return None, capabilities, route
     return loaded.module, capabilities, None
@@ -565,10 +666,7 @@ def _normalize_result(value: Any, store_v_seq: bool) -> AsPyIFResult:
     elif isinstance(value, tuple) and len(value) == 3:
         result = AsPyIFResult(value[0], value[1], value[2])
     else:
-        raise TypeError(
-            "AsPy IF extension must return AsPyIFResult or "
-            "(spike_seq, v_final, v_seq)"
-        )
+        raise TypeError("AsPy IF extension must return AsPyIFResult or (spike_seq, v_final, v_seq)")
     if not isinstance(result.spike_seq, torch.Tensor):
         raise TypeError("AsPy spike_seq result must be a tensor")
     if not isinstance(result.v_final, torch.Tensor):
@@ -580,7 +678,7 @@ def _normalize_result(value: Any, store_v_seq: bool) -> AsPyIFResult:
     return result
 
 
-def _validate_result(result: AsPyIFResult, request: _AsPyIFRequest) -> None:
+def _validate_native_result(result: AsPyIFResult, request: _AsPyIFRequest) -> None:
     x_seq = request.x_seq
     if result.spike_seq.shape != x_seq.shape:
         raise ValueError(
@@ -610,9 +708,7 @@ def _validate_result(result: AsPyIFResult, request: _AsPyIFRequest) -> None:
                 f"got device={tensor.device}, dtype={tensor.dtype}"
             )
         if not tensor.is_contiguous() or tensor.storage_offset() != 0:
-            raise ValueError(
-                f"AsPy {name} must be contiguous with storage offset zero"
-            )
+            raise ValueError(f"AsPy {name} must be contiguous with storage offset zero")
         format_reason = _require_npu_nd(tensor)
         if format_reason is not None:
             raise ValueError(f"AsPy {name} is not bridge-safe: {format_reason}")
@@ -662,20 +758,37 @@ def try_if_multi_step(
             requested_backend=requested_backend,
         )
 
+    plan, native_x_seq, native_v_init, conversion_error = _prepare_stateful_native_inputs(
+        x_seq, v_init
+    )
+    if conversion_error is not None:
+        return _fallback_or_reject(
+            "if",
+            reason_code="aspy.if.unsupported_converted_format",
+            reason=conversion_error,
+            strict=strict,
+            training=training,
+            requested_backend=requested_backend,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
+        )
+
     extension, capabilities, fallback = _load_for_capability(
         "if",
         strict=strict,
         training=training,
         adapter_symbol="if_multi_step",
         requested_backend=requested_backend,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
     if extension is None:
         assert fallback is not None
         return None, fallback
 
     request = _AsPyIFRequest(
-        x_seq=x_seq,
-        v_init=v_init,
+        x_seq=native_x_seq,
+        v_init=native_v_init,
         v_threshold=v_threshold,
         v_reset=v_reset,
         detach_reset=detach_reset,
@@ -694,16 +807,17 @@ def try_if_multi_step(
         request.surrogate_alpha,
         request.store_v_seq,
     )
-    result = _normalize_result(raw_result, store_v_seq)
-    _validate_result(result, request)
+    native_result = _normalize_result(raw_result, store_v_seq)
+    _validate_native_result(native_result, request)
+    result = _public_result(native_result, plan)
     return result, native_route(
-        _executed_neuron_capability(
-            "if", store_v_seq=store_v_seq, capabilities=capabilities
-        ),
+        _executed_neuron_capability("if", store_v_seq=store_v_seq, capabilities=capabilities),
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
         training=training,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
 
 
@@ -731,9 +845,7 @@ def try_lif_multi_step(
         v_threshold=v_threshold,
         v_reset=v_reset,
     )
-    if reason is None and (
-        not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0
-    ):
+    if reason is None and (not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0):
         reason = "AsPy LIF requires finite fixed float tau greater than 1"
     if reason is not None:
         return _fallback_or_reject(
@@ -745,20 +857,37 @@ def try_lif_multi_step(
             requested_backend=requested_backend,
         )
 
+    plan, native_x_seq, native_v_init, conversion_error = _prepare_stateful_native_inputs(
+        x_seq, v_init
+    )
+    if conversion_error is not None:
+        return _fallback_or_reject(
+            "lif",
+            reason_code="aspy.lif.unsupported_converted_format",
+            reason=conversion_error,
+            strict=strict,
+            training=training,
+            requested_backend=requested_backend,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
+        )
+
     extension, capabilities, fallback = _load_for_capability(
         "lif",
         strict=strict,
         training=training,
         adapter_symbol="lif_multi_step",
         requested_backend=requested_backend,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
     if extension is None:
         assert fallback is not None
         return None, fallback
 
     request = _AsPyLIFRequest(
-        x_seq=x_seq,
-        v_init=v_init,
+        x_seq=native_x_seq,
+        v_init=native_v_init,
         v_threshold=v_threshold,
         v_reset=v_reset,
         detach_reset=detach_reset,
@@ -781,16 +910,17 @@ def try_lif_multi_step(
         request.tau,
         request.decay_input,
     )
-    result = _normalize_result(raw_result, store_v_seq)
-    _validate_result(result, request)
+    native_result = _normalize_result(raw_result, store_v_seq)
+    _validate_native_result(native_result, request)
+    result = _public_result(native_result, plan)
     return result, native_route(
-        _executed_neuron_capability(
-            "lif", store_v_seq=store_v_seq, capabilities=capabilities
-        ),
+        _executed_neuron_capability("lif", store_v_seq=store_v_seq, capabilities=capabilities),
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
         training=training,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
 
 
@@ -843,20 +973,37 @@ def try_plif_multi_step(
             requested_backend=requested_backend,
         )
 
+    plan, native_x_seq, native_v_init, conversion_error = _prepare_stateful_native_inputs(
+        x_seq, v_init
+    )
+    if conversion_error is not None:
+        return _fallback_or_reject(
+            "plif",
+            reason_code="aspy.plif.unsupported_converted_format",
+            reason=conversion_error,
+            strict=strict,
+            training=training,
+            requested_backend=requested_backend,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
+        )
+
     extension, capabilities, fallback = _load_for_capability(
         "plif",
         strict=strict,
         training=training,
         adapter_symbol="plif_multi_step",
         requested_backend=requested_backend,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
     if extension is None:
         assert fallback is not None
         return None, fallback
 
     request = _AsPyPLIFRequest(
-        x_seq=x_seq,
-        v_init=v_init,
+        x_seq=native_x_seq,
+        v_init=native_v_init,
         reciprocal_tau=reciprocal_tau,
         v_threshold=v_threshold,
         v_reset=v_reset,
@@ -879,14 +1026,17 @@ def try_plif_multi_step(
         request.store_v_seq,
         request.decay_input,
     )
-    result = _normalize_result(raw_result, store_v_seq)
-    _validate_result(result, request)
+    native_result = _normalize_result(raw_result, store_v_seq)
+    _validate_native_result(native_result, request)
+    result = _public_result(native_result, plan)
     return result, native_route(
         "plif",
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
         training=training,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
 
 
@@ -916,9 +1066,7 @@ def try_klif_multi_step(
         v_threshold=v_threshold,
         v_reset=v_reset,
     )
-    if reason is None and (
-        not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0
-    ):
+    if reason is None and (not isinstance(tau, float) or not math.isfinite(tau) or tau <= 1.0):
         reason = "AsPy KLIF requires finite fixed float tau greater than 1"
     if reason is None and (
         k.device != x_seq.device
@@ -945,20 +1093,37 @@ def try_klif_multi_step(
             requested_backend=requested_backend,
         )
 
+    plan, native_x_seq, native_v_init, conversion_error = _prepare_stateful_native_inputs(
+        x_seq, v_init
+    )
+    if conversion_error is not None:
+        return _fallback_or_reject(
+            "klif",
+            reason_code="aspy.klif.unsupported_converted_format",
+            reason=conversion_error,
+            strict=strict,
+            training=training,
+            requested_backend=requested_backend,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
+        )
+
     extension, capabilities, fallback = _load_for_capability(
         "klif",
         strict=strict,
         training=training,
         adapter_symbol="klif_multi_step",
         requested_backend=requested_backend,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
     if extension is None:
         assert fallback is not None
         return None, fallback
 
     request = _AsPyKLIFRequest(
-        x_seq=x_seq,
-        v_init=v_init,
+        x_seq=native_x_seq,
+        v_init=native_v_init,
         k=k,
         v_threshold=v_threshold,
         v_reset=v_reset,
@@ -985,14 +1150,17 @@ def try_klif_multi_step(
         request.decay_input,
         request.scale_reset,
     )
-    result = _normalize_result(raw_result, store_v_seq)
-    _validate_result(result, request)
+    native_result = _normalize_result(raw_result, store_v_seq)
+    _validate_native_result(native_result, request)
+    result = _public_result(native_result, plan)
     return result, native_route(
         "klif",
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
         training=training,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
 
 
@@ -1010,15 +1178,13 @@ def try_fedsnn_decay_lif(
 
     reason = _unsupported_stateless_reason(current_seq, surrogate_function)
     if reason is None and (
-        not isinstance(membrane_decay, float)
-        or not 0.0 <= membrane_decay <= 1.0
+        not isinstance(membrane_decay, float) or not 0.0 <= membrane_decay <= 1.0
     ):
         reason = "AsPy FedSNN decay-LIF requires float membrane_decay in [0, 1]"
     if reason is None and not math.isfinite(v_threshold):
         reason = "AsPy FedSNN decay-LIF requires a finite v_threshold"
     if reason is None and (
-        not math.isfinite(surrogate_function.alpha)
-        or surrogate_function.alpha <= 0.0
+        not math.isfinite(surrogate_function.alpha) or surrogate_function.alpha <= 0.0
     ):
         reason = "AsPy FedSNN decay-LIF requires finite positive ATan alpha"
     if reason is not None:
@@ -1031,6 +1197,7 @@ def try_fedsnn_decay_lif(
             requested_backend=requested_backend,
         )
 
+    source_format = _npu_format_value(current_seq)[0]
     format_error = _require_fedsnn_base_format(current_seq)
     if format_error is not None:
         return _fallback_or_reject(
@@ -1042,12 +1209,29 @@ def try_fedsnn_decay_lif(
             requested_backend=requested_backend,
         )
 
+    plan = _precision_plan(current_seq)
+    native_current_seq = _to_native_fp32(current_seq)
+    native_format_error = _require_fedsnn_base_format(native_current_seq)
+    if native_format_error is not None:
+        return _fallback_or_reject(
+            "fedsnn_decay_lif",
+            reason_code="aspy.fedsnn_decay_lif.unsupported_converted_format",
+            reason=native_format_error,
+            strict=strict,
+            training=training,
+            requested_backend=requested_backend,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
+        )
+
     extension, capabilities, fallback = _load_for_capability(
         "fedsnn_decay_lif",
         strict=strict,
         training=training,
         adapter_symbol="fedsnn_decay_lif",
         requested_backend=requested_backend,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
     if extension is None:
         assert fallback is not None
@@ -1063,11 +1247,13 @@ def try_fedsnn_decay_lif(
             training=training,
             requested_backend=requested_backend,
             capabilities=capabilities,
+            dtype_conversion=plan.dtype_conversion,
+            dtype_conversion_bytes=plan.dtype_conversion_bytes,
         )
 
     implementation = extension.fedsnn_decay_lif
     request = _AsPyFedSNNDecayLIFRequest(
-        current_seq=current_seq,
+        current_seq=native_current_seq,
         membrane_decay=membrane_decay,
         v_threshold=v_threshold,
         surrogate_name="atan",
@@ -1082,27 +1268,44 @@ def try_fedsnn_decay_lif(
     )
     if not isinstance(spike_seq, torch.Tensor):
         raise TypeError("AsPy FedSNN decay-LIF result must be a tensor")
-    if spike_seq.shape != current_seq.shape:
+    if spike_seq.shape != request.current_seq.shape:
         raise ValueError(
             "AsPy FedSNN decay-LIF spike_seq shape mismatch: "
-            f"expected {tuple(current_seq.shape)}, got {tuple(spike_seq.shape)}"
+            f"expected {tuple(request.current_seq.shape)}, got {tuple(spike_seq.shape)}"
         )
-    if spike_seq.device != current_seq.device or spike_seq.dtype != current_seq.dtype:
+    if (
+        spike_seq.device != request.current_seq.device
+        or spike_seq.dtype != request.current_seq.dtype
+    ):
         raise ValueError(
-            "AsPy FedSNN decay-LIF spike_seq must match input device and dtype"
+            "AsPy FedSNN decay-LIF native spike_seq must match native input device and dtype"
+        )
+    if not spike_seq.is_contiguous() or spike_seq.storage_offset() != 0:
+        raise ValueError(
+            "AsPy FedSNN decay-LIF native spike_seq must be contiguous with storage offset zero"
+        )
+    spike_format_error = _require_npu_nd(spike_seq)
+    if spike_format_error is not None:
+        raise ValueError(
+            f"AsPy FedSNN decay-LIF native spike_seq is not bridge-safe: {spike_format_error}"
         )
     format_conversion = (
-        "ncdhw-to-nd-copy"
-        if current_seq.ndim == 5 and _npu_format_value(current_seq)[0] == 30
-        else None
+        "ncdhw-to-nd-copy" if current_seq.ndim == 5 and source_format == 30 else None
     )
-    return spike_seq, native_route(
+    public_spike_seq = (
+        spike_seq
+        if plan.public_dtype == plan.native_dtype
+        else spike_seq.to(dtype=plan.public_dtype).contiguous()
+    )
+    return public_spike_seq, native_route(
         "fedsnn_decay_lif",
         capabilities,
         requested_backend=requested_backend,
         strict=strict,
         training=training,
         format_conversion=format_conversion,
+        dtype_conversion=plan.dtype_conversion,
+        dtype_conversion_bytes=plan.dtype_conversion_bytes,
     )
 
 

@@ -51,18 +51,48 @@ def test_provider_validation_and_route_serialization():
         bucket="t16-b8",
         native_region="qkv-to-output",
         format_conversion="ncdhw-to-nd-copy",
+        dtype_conversion="bf16-public-fp32-aspy-island",
+        dtype_conversion_bytes=6144,
     )
     assert route.requested_backend == "auto"
     assert route.backend == "aspy"
     assert route.training
     assert route.native_launch_attempted
     assert route.accelerated
+    assert route.dtype_conversion == "bf16-public-fp32-aspy-island"
+    assert route.dtype_conversion_bytes == 6144
     assert json.loads(json.dumps(route.to_dict())) == route.to_dict()
     with pytest.raises(AttributeError):
         route.__dict__["reason"] = "changed"
 
     with pytest.raises((AttributeError, TypeError)):
         route.reason = "changed"
+    with pytest.raises(TypeError, match="dtype_conversion_bytes"):
+        ProviderRoute(
+            requested_provider="torch",
+            actual_provider="torch",
+            logical_operation="sequence.test",
+            reason_code="torch.test",
+            reason="invalid conversion bytes",
+            accelerated=False,
+            strict=False,
+            mode="eval",
+            native_launch_attempted=False,
+            dtype_conversion_bytes=True,
+        )
+    with pytest.raises(ValueError, match="dtype_conversion_bytes"):
+        ProviderRoute(
+            requested_provider="torch",
+            actual_provider="torch",
+            logical_operation="sequence.test",
+            reason_code="torch.test",
+            reason="invalid conversion bytes",
+            accelerated=False,
+            strict=False,
+            mode="eval",
+            native_launch_attempted=False,
+            dtype_conversion_bytes=-1,
+        )
     with pytest.raises(ValueError, match="reason_code"):
         ProviderRoute(
             requested_provider="torch",
@@ -329,9 +359,7 @@ def test_malformed_capability_data_fails_closed(module):
         ),
     ],
 )
-def test_old_or_unknown_versioned_bundles_have_stable_reason_codes(
-    module, reason_code
-):
+def test_old_or_unknown_versioned_bundles_have_stable_reason_codes(module, reason_code):
     capabilities = probe_aspy_capabilities(module)
     assert capabilities.bundle_present
     assert not capabilities.available
@@ -352,9 +380,7 @@ def test_absent_bundle_probe_has_stable_reason_code():
     [OSError("missing linked library"), RuntimeError("broken loader")],
 )
 def test_present_but_unloadable_bundle_has_stable_reason_code(error):
-    capabilities = probe_aspy_capabilities(
-        loader=lambda: (_ for _ in ()).throw(error)
-    )
+    capabilities = probe_aspy_capabilities(loader=lambda: (_ for _ in ()).throw(error))
     assert capabilities.bundle_present
     assert not capabilities.available
     assert capabilities.source == "invalid"

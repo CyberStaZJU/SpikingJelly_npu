@@ -70,6 +70,16 @@ def _optional_version(value: object, field: str) -> int | None:
     return value
 
 
+def _optional_nonnegative_int(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be an integer or None")
+    if value < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return value
+
+
 def validate_provider(provider: str, *, actual: bool = False) -> str:
     """Validate and return a provider name.
 
@@ -117,6 +127,8 @@ class ProviderRoute:
     bucket: str | None = None
     native_region: str | None = None
     format_conversion: str | None = None
+    dtype_conversion: str | None = None
+    dtype_conversion_bytes: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -149,17 +161,13 @@ class ProviderRoute:
             raise TypeError("strict must be a bool")
         if type(self.native_launch_attempted) is not bool:
             raise TypeError("native_launch_attempted must be a bool")
-        object.__setattr__(
-            self, "abi_version", _optional_version(self.abi_version, "abi_version")
-        )
+        object.__setattr__(self, "abi_version", _optional_version(self.abi_version, "abi_version"))
         object.__setattr__(
             self,
             "schema_version",
             _optional_version(self.schema_version, "schema_version"),
         )
-        object.__setattr__(
-            self, "bucket", _validated_optional_string(self.bucket, "bucket")
-        )
+        object.__setattr__(self, "bucket", _validated_optional_string(self.bucket, "bucket"))
         object.__setattr__(
             self,
             "native_region",
@@ -169,6 +177,19 @@ class ProviderRoute:
             self,
             "format_conversion",
             _validated_optional_string(self.format_conversion, "format_conversion"),
+        )
+        object.__setattr__(
+            self,
+            "dtype_conversion",
+            _validated_optional_string(self.dtype_conversion, "dtype_conversion"),
+        )
+        object.__setattr__(
+            self,
+            "dtype_conversion_bytes",
+            _optional_nonnegative_int(
+                self.dtype_conversion_bytes,
+                "dtype_conversion_bytes",
+            ),
         )
         if self.actual_provider is None:
             if not self.strict:
@@ -199,13 +220,9 @@ class ProviderRoute:
                     f"actual_provider={self.actual_provider!r}"
                 )
             if not self.accelerated:
-                raise ValueError(
-                    "actual_provider='vendor' or 'aspy' requires accelerated=True"
-                )
+                raise ValueError("actual_provider='vendor' or 'aspy' requires accelerated=True")
             if not self.native_launch_attempted:
-                raise ValueError(
-                    "an accelerated route requires native_launch_attempted=True"
-                )
+                raise ValueError("an accelerated route requires native_launch_attempted=True")
 
     @property
     def requested_backend(self) -> str:
@@ -255,6 +272,8 @@ def torch_route(
     bucket: str | None = None,
     native_region: str | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> ProviderRoute:
     """Build an executed PyTorch route, including observable fallback reasons."""
 
@@ -273,6 +292,8 @@ def torch_route(
         bucket=bucket,
         native_region=native_region,
         format_conversion=format_conversion,
+        dtype_conversion=dtype_conversion,
+        dtype_conversion_bytes=dtype_conversion_bytes,
     )
 
 
@@ -291,6 +312,8 @@ def accelerated_route(
     bucket: str | None = None,
     native_region: str | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> ProviderRoute:
     """Build an executed vendor or AsPy accelerated route."""
 
@@ -312,6 +335,8 @@ def accelerated_route(
         bucket=bucket,
         native_region=native_region,
         format_conversion=format_conversion,
+        dtype_conversion=dtype_conversion,
+        dtype_conversion_bytes=dtype_conversion_bytes,
     )
 
 
@@ -327,6 +352,8 @@ def strict_pre_execution_rejection(
     bucket: str | None = None,
     native_region: str | None = None,
     format_conversion: str | None = None,
+    dtype_conversion: str | None = None,
+    dtype_conversion_bytes: int | None = None,
 ) -> NoReturn:
     """Raise a structured strict rejection before any native launch."""
 
@@ -346,6 +373,8 @@ def strict_pre_execution_rejection(
             bucket=bucket,
             native_region=native_region,
             format_conversion=format_conversion,
+            dtype_conversion=dtype_conversion,
+            dtype_conversion_bytes=dtype_conversion_bytes,
         )
     )
 
@@ -361,9 +390,7 @@ class AsPyCapabilityGroup:
     symbols: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "name", _nonempty_string(self.name, "capability name")
-        )
+        object.__setattr__(self, "name", _nonempty_string(self.name, "capability name"))
         normalized = tuple(self.symbols)
         if not normalized:
             raise ValueError("capability symbols must not be empty")
@@ -391,9 +418,7 @@ class AsPyCapabilities:
     def __post_init__(self) -> None:
         if type(self.bundle_present) is not bool or type(self.available) is not bool:
             raise TypeError("bundle_present and available must be bool values")
-        object.__setattr__(
-            self, "abi_version", _optional_version(self.abi_version, "abi_version")
-        )
+        object.__setattr__(self, "abi_version", _optional_version(self.abi_version, "abi_version"))
         object.__setattr__(
             self,
             "schema_version",
@@ -467,10 +492,7 @@ class AsPyCapabilities:
             "abi_version": self.abi_version,
             "schema_version": self.schema_version,
             "capabilities": list(self.capabilities),
-            "groups": {
-                group.name: list(group.symbols)
-                for group in self.groups
-            },
+            "groups": {group.name: list(group.symbols) for group in self.groups},
             "symbols": list(self.symbols),
             "source": self.source,
             "reason_code": self.reason_code,
@@ -577,9 +599,7 @@ def _declared_groups(
     if isinstance(raw_groups, Mapping):
         for raw_name, raw_group_symbols in raw_groups.items():
             name = _nonempty_string(raw_name, "capability name")
-            group_symbols = _string_sequence(
-                raw_group_symbols, f"capability {name!r} symbols"
-            )
+            group_symbols = _string_sequence(raw_group_symbols, f"capability {name!r} symbols")
             groups.append(AsPyCapabilityGroup(name, group_symbols))
     else:
         names = _string_sequence(raw_groups, "capabilities")
@@ -588,9 +608,7 @@ def _declared_groups(
         for name in names:
             required = _LEGACY_CAPABILITY_SYMBOLS.get(name)
             if required is None:
-                raise ValueError(
-                    f"capability {name!r} must declare its symbol group explicitly"
-                )
+                raise ValueError(f"capability {name!r} must declare its symbol group explicitly")
             if not set(required).issubset(declared_set):
                 raise ValueError(f"capability {name!r} is missing a required symbol")
             groups.append(AsPyCapabilityGroup(name, required))

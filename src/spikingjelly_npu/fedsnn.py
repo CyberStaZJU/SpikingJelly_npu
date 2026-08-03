@@ -66,9 +66,11 @@ class FedSNNDecayLIF(nn.Module):
     """Stateless FedSNN decay-LIF scan with an exact optional AsPy route.
 
     Every forward starts from a zero membrane and returns only the spike
-    sequence. The qualified native path is intentionally narrow: FP32,
-    contiguous, storage-offset-zero NPU input, spiking ATan surrogate, soft
-    reset, and detached reset. All other requests fall back before execution,
+    sequence. The native ABI remains FP32. A BF16 public input uses an explicit
+    FP32 AsPy island and casts the public spike sequence back to BF16; this is
+    not a BF16-native kernel. Inputs must otherwise be contiguous,
+    storage-offset-zero NPU tensors with a spiking ATan surrogate, soft reset,
+    and detached reset. All unsupported requests fall back before execution,
     unless ``backend_strict=True``.
     """
 
@@ -94,8 +96,7 @@ class FedSNNDecayLIF(nn.Module):
             surrogate.ATan() if surrogate_function is None else surrogate_function
         )
         if isinstance(self.surrogate_function, surrogate.ATan) and (
-            not math.isfinite(self.surrogate_function.alpha)
-            or self.surrogate_function.alpha <= 0.0
+            not math.isfinite(self.surrogate_function.alpha) or self.surrogate_function.alpha <= 0.0
         ):
             raise ValueError("ATan surrogate alpha must be finite and positive")
         self.backend = backend
@@ -109,7 +110,16 @@ class FedSNNDecayLIF(nn.Module):
         )
 
     def _torch_forward(self, current_seq: Tensor) -> Tensor:
-        membrane = torch.zeros_like(current_seq[0])
+        state_dtype = (
+            torch.float32
+            if self.backend == "aspy" and current_seq.dtype == torch.bfloat16
+            else current_seq.dtype
+        )
+        membrane = torch.zeros(
+            current_seq.shape[1:],
+            dtype=state_dtype,
+            device=current_seq.device,
+        )
         spikes = []
         for t in range(current_seq.shape[0]):
             charged = membrane * self.membrane_decay
@@ -117,13 +127,14 @@ class FedSNNDecayLIF(nn.Module):
             spike = self.surrogate_function(charged - self.v_threshold)
             membrane = charged - spike.detach() * self.v_threshold
             spikes.append(spike)
-        return torch.stack(spikes)
+        output = torch.stack(spikes)
+        if current_seq.dtype == torch.bfloat16 and output.dtype != current_seq.dtype:
+            output = output.to(dtype=current_seq.dtype)
+        return output
 
     def forward(self, current_seq: Tensor) -> Tensor:
         if current_seq.ndim < 2:
-            raise ValueError(
-                f"expected [T, N, ...], got shape={tuple(current_seq.shape)}"
-            )
+            raise ValueError(f"expected [T, N, ...], got shape={tuple(current_seq.shape)}")
         if current_seq.shape[0] == 0:
             raise ValueError("DecayLIF requires at least one time step")
         if current_seq[0].numel() == 0:
@@ -389,18 +400,16 @@ class PackedBNTTConvNet(nn.Module):
         spikes = self.neuron2(currents)
         currents = []
         for t in range(self.time_steps):
-            pooled = torch.nn.functional.adaptive_avg_pool2d(
-                spikes[t], self.pool2.output_size
-            )
+            pooled = torch.nn.functional.adaptive_avg_pool2d(spikes[t], self.pool2.output_size)
             flattened = torch.flatten(pooled, 1)
-            current = torch.nn.functional.linear(
-                flattened, self.fc1.weight, self.fc1.bias
-            )
+            current = torch.nn.functional.linear(flattened, self.fc1.weight, self.fc1.bias)
             currents.append(self.bntt3.layers[t](current))
         spikes = self.neuron3(torch.stack(currents))
         logits = torch.stack(
-            [torch.nn.functional.linear(spikes[t], self.readout.weight, self.readout.bias)
-             for t in range(self.time_steps)]
+            [
+                torch.nn.functional.linear(spikes[t], self.readout.weight, self.readout.bias)
+                for t in range(self.time_steps)
+            ]
         )
         return logits.mean(0)
 

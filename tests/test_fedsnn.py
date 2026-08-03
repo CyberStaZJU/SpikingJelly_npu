@@ -52,9 +52,7 @@ def test_decay_lif_exact_order_forward_gradient_and_state_dict_neutrality():
     for t in range(reference_current.shape[0]):
         charged = membrane * reference_module.membrane_decay
         charged = charged + reference_current[t]
-        spike = reference_module.surrogate_function(
-            charged - reference_module.v_threshold
-        )
+        spike = reference_module.surrogate_function(charged - reference_module.v_threshold)
         membrane = charged - spike.detach() * reference_module.v_threshold
         expected_spikes.append(spike)
     expected = torch.stack(expected_spikes)
@@ -109,9 +107,7 @@ def test_decay_lif_aspy_cpu_fallback_and_strict_pre_execution(monkeypatch):
     assert isinstance(routed.last_backend_route, _aspy.AsPyRoute)
     assert routed.last_backend_route.backend == "torch"
     assert routed.last_backend_route.logical_operation == "fedsnn.decay_lif"
-    assert routed.last_backend_route.reason_code == (
-        "aspy.fedsnn_decay_lif.unsupported_request"
-    )
+    assert routed.last_backend_route.reason_code == ("aspy.fedsnn_decay_lif.unsupported_request")
     assert not routed.last_backend_route.native_launch_attempted
     assert "requires an NPU tensor" in routed.last_backend_route.reason
 
@@ -247,6 +243,106 @@ def test_decay_lif_malformed_native_results_propagate(
     assert eager_calls == []
 
 
+def test_decay_lif_malformed_native_layout_is_rejected_without_eager_replay(
+    monkeypatch,
+):
+    module = DecayLIF(0.75, backend="aspy")
+    current = torch.zeros(3, 2, 4)
+    base = torch.zeros(3, 2, 8)
+    noncontiguous = base[..., ::2]
+    assert noncontiguous.shape == current.shape
+    assert not noncontiguous.is_contiguous()
+    monkeypatch.setattr(_aspy, "_unsupported_stateless_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_require_fedsnn_base_format", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                supports_fedsnn_decay_lif=True,
+                fedsnn_decay_lif=lambda *args: noncontiguous,
+            ),
+            None,
+        ),
+    )
+    eager_calls = []
+    monkeypatch.setattr(
+        module,
+        "_torch_forward",
+        lambda value: eager_calls.append(value) or torch.zeros_like(value),
+    )
+
+    with pytest.raises(ValueError, match="contiguous with storage offset zero"):
+        module(current)
+    assert eager_calls == []
+
+
+def test_decay_lif_malformed_native_physical_format_is_rejected(monkeypatch):
+    module = DecayLIF(0.75, backend="aspy")
+    current = torch.zeros(3, 2, 4)
+    spike_seq = torch.zeros_like(current)
+    monkeypatch.setattr(_aspy, "_unsupported_stateless_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_require_fedsnn_base_format", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_require_npu_nd",
+        lambda tensor: (
+            "AsPy native bridge requires physical ACL_FORMAT_ND (2), got format=29"
+            if tensor is spike_seq
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                supports_fedsnn_decay_lif=True,
+                fedsnn_decay_lif=lambda *args: spike_seq,
+            ),
+            None,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="format=29"):
+        module(current)
+
+
+def test_decay_lif_bf16_uses_fp32_native_island(monkeypatch):
+    module = DecayLIF(0.75, backend="aspy", backend_strict=True)
+    current = torch.zeros(3, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+    calls = []
+
+    def implementation(native_current, *args):
+        calls.append((native_current, args))
+        assert native_current.dtype == torch.float32
+        return native_current * 0.0 + 1.0
+
+    monkeypatch.setattr(_aspy, "_unsupported_stateless_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_require_fedsnn_base_format", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                supports_fedsnn_decay_lif=True,
+                fedsnn_decay_lif=implementation,
+            ),
+            None,
+        ),
+    )
+
+    output = module(current)
+    output.float().sum().backward()
+
+    assert len(calls) == 1
+    assert output.dtype == torch.bfloat16
+    assert current.grad is not None and current.grad.dtype == torch.bfloat16
+    assert module.last_backend_route.backend == "aspy"
+    assert module.last_backend_route.dtype_conversion == "bf16-public-fp32-aspy-island"
+    assert module.last_backend_route.dtype_conversion_bytes == 2 * current.numel() * (2 + 4)
+
+
 def test_decay_lif_native_launch_failure_is_never_replayed_eager(monkeypatch):
     module = DecayLIF(0.75, backend="aspy")
     current = torch.zeros(3, 2, 4)
@@ -260,8 +356,10 @@ def test_decay_lif_native_launch_failure_is_never_replayed_eager(monkeypatch):
         lambda: (
             SimpleNamespace(
                 supports_fedsnn_decay_lif=True,
-                fedsnn_decay_lif=lambda *args: native_calls.append(args)
-                or (_ for _ in ()).throw(RuntimeError("native launch failed")),
+                fedsnn_decay_lif=lambda *args: (
+                    native_calls.append(args)
+                    or (_ for _ in ()).throw(RuntimeError("native launch failed"))
+                ),
             ),
             None,
         ),

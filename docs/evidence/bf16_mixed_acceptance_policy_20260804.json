@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "decision_date": "2026-08-04",
+  "decision_source": "user",
+  "status": "component_qualified_physical_aspy_fp32_island",
+  "identity": "ascend910b4_bf16_mixed_fp32_state_v1",
+  "qualified_target": {
+    "device": "Ascend 910B4",
+    "cann": "8.5.0",
+    "python": "3.10.20",
+    "torch": "2.9.0",
+    "torch_npu": "2.9.0",
+    "autocast": {
+      "device_type": "npu",
+      "dtype": "torch.bfloat16",
+      "cache_enabled": false
+    },
+    "conv_hf32": false,
+    "autograd": "first_order"
+  },
+  "precision_contract": {
+    "master_parameters_gradients_and_optimizer_state": "float32; configure AsPy before dtype conversion and create or recreate the optimizer after backend/dtype setup",
+    "qualified_conv_linear_matmul_hotspots": "bfloat16",
+    "normalization_membrane_threshold_surrogate_and_reductions": "float32_allowed_or_required",
+    "aspy": {
+      "public_activation_and_spike_dtype": "bfloat16",
+      "native_abi_dtype": "float32",
+      "state_dtype": "float32",
+      "plif_klif_scalar_parameter_dtype": "float32",
+      "conversion_route": "bf16-public-fp32-aspy-island",
+      "conversion_bytes_semantics": "estimated forward boundary traffic only; backward cast and framework traffic require measurement",
+      "claim": "BF16 mixed precision through an FP32 AsPy native island; not a BF16-native AsPy kernel"
+    }
+  },
+  "scope": {
+    "sequence_layout": "dense_fixed_length",
+    "graph_shapes": "finite_explicit_exact_shape_buckets_only",
+    "training_and_inference": true,
+    "full_remainder_singleton_batches": true,
+    "unsupported": [
+      "true_acl_bf16_aspy_native_io",
+      "fp16_aspy",
+      "higher_order_aspy_gradients",
+      "ragged_or_arbitrary_dynamic_shapes",
+      "silent_post_launch_eager_replay",
+      "bf16_family_wide_claims_from_one_primitive"
+    ]
+  },
+  "same_mode_bf16_correctness_gates": {
+    "finite_outputs_losses_gradients_and_updates": true,
+    "discrete_spikes": "exact",
+    "public_bf16_output": "exact_after_reference_fp32_island_output_is_cast_to_bfloat16",
+    "aspy_fp32_state": {
+      "rtol": 0.00005,
+      "atol": 0.00003
+    },
+    "input_and_master_parameter_gradients_after_bf16_cast_boundary": {
+      "rtol": 0.005,
+      "atol": 0.005
+    },
+    "strict_route_has_no_fallback": true,
+    "physical_format_validation_before_extension_loading": true,
+    "no_eager_replay_after_native_launch": true
+  },
+  "bf16_vs_fp32_interpretation": {
+    "equivalence_claim": false,
+    "purpose": "quality, convergence, latency, and memory comparison",
+    "training_trajectory": "three seeds times twenty optimizer steps before a native training claim",
+    "convergence_canary": "three paired seeds and at least 200 optimizer updates"
+  },
+  "measurement_protocol": {
+    "fresh_processes": 5,
+    "balanced_interleaved_order": true,
+    "same_input_and_state_hash": true,
+    "warmup_required": true,
+    "device_synchronization": "before_and_after_each_measured_region",
+    "report": [
+      "raw_process_medians",
+      "median_of_five",
+      "mean",
+      "p90",
+      "peak_allocated_hbm",
+      "peak_reserved_hbm",
+      "provider_route",
+      "dtype_conversion_kind",
+      "dtype_conversion_bytes",
+      "source_and_native_bundle_identity"
+    ]
+  },
+  "claim_boundary": "Passing AsPy cases qualifies BF16 public tensors routed through the unchanged FP32 AsPy ABI on the stated stack and shapes. It does not qualify native BF16 kernel arithmetic, all models, convergence, NPUGraph, or a performance improvement until those gates are separately completed."
+}
