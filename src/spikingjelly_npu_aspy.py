@@ -14,6 +14,8 @@ import torch
 from spikingjelly_npu._native import load_aspy_native
 
 _native = load_aspy_native()
+aspy_abi_version = getattr(_native, "aspy_abi_version", None)
+aspy_capabilities = getattr(_native, "aspy_capabilities", None)
 if_backward = _native.if_backward
 if_forward = _native.if_forward
 lif_backward = _native.lif_backward
@@ -724,6 +726,8 @@ def fedsnn_decay_lif(
 
 
 __all__ = [
+    "aspy_abi_version",
+    "aspy_capabilities",
     "fedsnn_decay_lif",
     "if_multi_step",
     "klif_multi_step",

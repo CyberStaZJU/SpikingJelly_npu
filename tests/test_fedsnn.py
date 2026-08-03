@@ -5,6 +5,7 @@ import torch
 
 from spikingjelly_npu.activation_based import _aspy, surrogate
 from spikingjelly_npu.fedsnn import DecayLIF, MultiStepLIF, PackedBNTTConvNet, PoissonEncoder
+from spikingjelly_npu.routing import ProviderRoute
 
 
 def test_poisson_encoder_shape_values_and_seed_repeatability():
@@ -104,7 +105,14 @@ def test_decay_lif_aspy_cpu_fallback_and_strict_pre_execution(monkeypatch):
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(routed_current.grad, eager_current.grad)
+    assert isinstance(routed.last_backend_route, ProviderRoute)
+    assert isinstance(routed.last_backend_route, _aspy.AsPyRoute)
     assert routed.last_backend_route.backend == "torch"
+    assert routed.last_backend_route.logical_operation == "fedsnn.decay_lif"
+    assert routed.last_backend_route.reason_code == (
+        "aspy.fedsnn_decay_lif.unsupported_request"
+    )
+    assert not routed.last_backend_route.native_launch_attempted
     assert "requires an NPU tensor" in routed.last_backend_route.reason
 
     load_calls = []
@@ -159,7 +167,11 @@ def test_decay_lif_fake_native_route_returns_only_spikes(monkeypatch):
     assert output is spike_seq
     assert calls[0][0] is current
     assert calls[0][1:] == (0.75, 0.7, "atan", 2.5)
+    assert isinstance(module.last_backend_route, ProviderRoute)
+    assert isinstance(module.last_backend_route, _aspy.AsPyRoute)
     assert module.last_backend_route.backend == "aspy"
+    assert module.last_backend_route.reason_code == "aspy.fedsnn_decay_lif.native"
+    assert module.last_backend_route.native_launch_attempted
     assert module.last_backend_route.accelerated
     assert "FedSNN decay-LIF" in module.last_backend_route.reason
     assert module.state_dict() == {}
@@ -224,8 +236,46 @@ def test_decay_lif_malformed_native_results_propagate(
         ),
     )
 
+    eager_calls = []
+    monkeypatch.setattr(
+        module,
+        "_torch_forward",
+        lambda value: eager_calls.append(value) or torch.zeros_like(value),
+    )
     with pytest.raises(error_type, match=match):
         module(current)
+    assert eager_calls == []
+
+
+def test_decay_lif_native_launch_failure_is_never_replayed_eager(monkeypatch):
+    module = DecayLIF(0.75, backend="aspy")
+    current = torch.zeros(3, 2, 4)
+    native_calls = []
+    eager_calls = []
+    monkeypatch.setattr(_aspy, "_unsupported_stateless_reason", lambda *args: None)
+    monkeypatch.setattr(_aspy, "_require_fedsnn_base_format", lambda tensor: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                supports_fedsnn_decay_lif=True,
+                fedsnn_decay_lif=lambda *args: native_calls.append(args)
+                or (_ for _ in ()).throw(RuntimeError("native launch failed")),
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_torch_forward",
+        lambda value: eager_calls.append(value) or torch.zeros_like(value),
+    )
+
+    with pytest.raises(RuntimeError, match="native launch failed"):
+        module(current)
+    assert len(native_calls) == 1
+    assert eager_calls == []
 
 
 def test_packed_convnet_matches_stepwise_reference_in_eval_and_gradients():

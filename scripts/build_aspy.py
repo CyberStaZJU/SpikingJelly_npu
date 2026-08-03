@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Validate the deterministic AsPy operator manifest and emit build inputs."""
+"""Validate the AsPy operator manifest and materialize deterministic build inputs."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import shutil
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,14 +19,26 @@ ASPY_ABI_VERSION = 1
 ASPY_CAPABILITY_SCHEMA_VERSION = 1
 
 _PYBIND_SYMBOL = re.compile(r'module\.def\(\s*"([a-z0-9_]+)"')
-_CAPABILITY_RAW_STRING = re.compile(
-    r'"aspy_capabilities",\s*\[\]\(\) \{\s*return std::string\(\s*R"\((\{.*?\})\)"\);',
-    re.DOTALL,
-)
 _CMAKE_KERNEL = re.compile(
     r"add_kernel_compile\(\s*([A-Za-z0-9_]+)\s+"
     r"\$\{CMAKE_CURRENT_SOURCE_DIR\}/([A-Za-z0-9_./-]+)\s*\)"
 )
+_HOST_CLASS = re.compile(r"class\s+([A-Za-z0-9_]+)\s*:\s*public\s+OpDef")
+_HOST_OP_ADD = re.compile(r"OP_ADD\(\s*([A-Za-z0-9_]+)\s*\)")
+_TILING_REGISTRATION = re.compile(
+    r"REGISTER_TILING_DATA_CLASS\(\s*([A-Za-z0-9_]+)\s*,",
+    re.DOTALL,
+)
+_KERNEL_ENTRY = re.compile(
+    r'extern\s+"C"\s+__global__\s+__aicore__\s+void\s+([a-z0-9_]+)\s*\('
+)
+_ACLNN_INCLUDE = re.compile(r'#include\s+"aclnn_([a-z0-9_]+)\.h"')
+_ACLNN_CALL = re.compile(
+    r"\baclnn(AsPy[A-Za-z0-9]+?)(?:GetWorkspaceSize)?\s*\("
+)
+_GENERATED_CAPABILITY_INCLUDE = '#include "aspy_capabilities.generated.h"'
+_CAPABILITY_ABI_REFERENCE = "kSpikingJellyNpuAsPyAbiVersion"
+_CAPABILITY_JSON_REFERENCE = "kSpikingJellyNpuAsPyCapabilitiesJson"
 
 
 class ManifestError(ValueError):
@@ -41,6 +54,18 @@ class Operator:
     symbol: str
     host_sources: tuple[str, ...]
     kernel_source: str
+
+    @property
+    def host_implementation(self) -> str:
+        return next(source for source in self.host_sources if source.endswith(".cpp"))
+
+    @property
+    def host_tiling_header(self) -> str:
+        return next(source for source in self.host_sources if source.endswith(".h"))
+
+    @property
+    def kernel_entry(self) -> str:
+        return Path(self.kernel_source).stem
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +209,11 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> OperatorManifest:
                 raise ManifestError(
                     f"operator {name}/{direction} must name implementation and tiling header"
                 )
+            suffixes = sorted(Path(source).suffix for source in host_sources)
+            if suffixes != [".cpp", ".h"]:
+                raise ManifestError(
+                    f"operator {name}/{direction} host_sources must contain one .cpp and one .h"
+                )
             operators.append(
                 Operator(
                     capability=name,
@@ -203,6 +233,11 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> OperatorManifest:
             )
     if not operators:
         raise ManifestError("manifest contains no operators")
+    duplicate_api_symbols = _duplicates(capability_api_symbols)
+    if duplicate_api_symbols:
+        raise ManifestError(
+            "duplicate capability API symbols: " + ", ".join(duplicate_api_symbols)
+        )
     return OperatorManifest(
         schema_version=schema_version,
         aspy_abi_version=aspy_abi_version,
@@ -223,48 +258,61 @@ def _duplicates(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(duplicates))
 
 
-def _definition_ops(root: Path, definitions: Iterable[str]) -> set[str]:
-    result = set()
+def _read_text(path: Path, description: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ManifestError(f"could not read {description} {path}: {error}") from error
+
+
+def _definition_ops(root: Path, definitions: Iterable[str]) -> dict[str, set[str]]:
+    result = {}
     for relative in definitions:
         path = root / relative
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise ManifestError(f"could not read native definition {relative}: {error}") from error
+            raise ManifestError(
+                f"could not read native definition {relative}: {error}"
+            ) from error
         entries = _sequence(payload, relative)
-        for index, raw_entry in enumerate(entries):
-            entry = _mapping(raw_entry, f"{relative}[{index}]")
-            result.add(_string(entry.get("op"), f"{relative}[{index}].op"))
+        result[relative] = {
+            _string(
+                _mapping(raw_entry, f"{relative}[{index}]").get("op"),
+                f"{relative}[{index}].op",
+            )
+            for index, raw_entry in enumerate(entries)
+        }
     return result
-
-
-def _bridge_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ManifestError(f"could not read bridge source {path}: {error}") from error
 
 
 def _bridge_symbols(text: str) -> set[str]:
     return set(_PYBIND_SYMBOL.findall(text))
 
 
-def _bridge_capability_payload(text: str) -> object:
-    match = _CAPABILITY_RAW_STRING.search(text)
-    if match is None:
-        raise ManifestError("bridge does not contain a literal aspy_capabilities payload")
-    try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError as error:
-        raise ManifestError(f"bridge AsPy capability payload is invalid JSON: {error}") from error
-
-
 def _cmake_kernels(path: Path) -> set[tuple[str, str]]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ManifestError(f"could not read kernel CMake file {path}: {error}") from error
-    return {(op, source) for op, source in _CMAKE_KERNEL.findall(text)}
+    return {(op, source) for op, source in _CMAKE_KERNEL.findall(_read_text(path, "CMake"))}
+
+
+def _host_contract(root: Path, operator: Operator) -> tuple[set[str], set[str], set[str]]:
+    implementation = _read_text(root / operator.host_implementation, "host implementation")
+    tiling_header = _read_text(root / operator.host_tiling_header, "tiling header")
+    return (
+        set(_HOST_CLASS.findall(implementation)),
+        set(_HOST_OP_ADD.findall(implementation)),
+        set(_TILING_REGISTRATION.findall(tiling_header)),
+    )
+
+
+def _kernel_contract(root: Path, operator: Operator) -> set[str]:
+    text = _read_text(root / operator.kernel_source, "kernel source")
+    return set(_KERNEL_ENTRY.findall(text))
+
+
+def _bridge_native_contract(text: str) -> tuple[set[str], set[str]]:
+    includes = set(_ACLNN_INCLUDE.findall(text))
+    calls = set(_ACLNN_CALL.findall(text))
+    return includes, calls
 
 
 def _tracked_native_files(root: Path) -> set[str]:
@@ -292,7 +340,7 @@ def validate_manifest(
     root: Path = ROOT,
     require_complete_native_tree: bool = True,
 ) -> None:
-    """Validate paths, definitions, bridge symbols, CMake entries, and coverage."""
+    """Validate definition, host, kernel, CMake, bridge, and tree consistency."""
 
     errors = []
     if manifest.schema_version != ASPY_CAPABILITY_SCHEMA_VERSION:
@@ -316,42 +364,67 @@ def validate_manifest(
     if duplicate_symbols:
         errors.append(f"duplicate bridge symbols: {', '.join(duplicate_symbols)}")
     if duplicate_sources:
-        errors.append(f"native source reused by multiple operators: {', '.join(duplicate_sources)}")
+        errors.append(
+            f"native source reused by multiple operators: {', '.join(duplicate_sources)}"
+        )
 
     for relative in manifest.sources:
         if not (root / relative).is_file():
             errors.append(f"missing manifest source: {relative}")
-
     if errors:
         raise ManifestError("\n".join(errors))
 
-    defined_ops = _definition_ops(root, manifest.definitions)
+    definitions = _definition_ops(root, manifest.definitions)
+    for relative, defined_ops in definitions.items():
+        expected = {
+            operator.op
+            for operator in manifest.operators
+            if operator.definition == relative
+        }
+        if defined_ops != expected:
+            errors.append(
+                f"definition {relative} operators differ: "
+                f"missing={sorted(expected - defined_ops)}, "
+                f"extra={sorted(defined_ops - expected)}"
+            )
+    all_defined_ops = {
+        op for defined_ops in definitions.values() for op in defined_ops
+    }
     expected_ops = {operator.op for operator in manifest.operators}
-    if defined_ops != expected_ops:
+    if all_defined_ops != expected_ops:
         errors.append(
-            "definition operators differ: "
-            f"missing={sorted(expected_ops - defined_ops)}, "
-            f"extra={sorted(defined_ops - expected_ops)}"
+            "combined definition operators differ: "
+            f"missing={sorted(expected_ops - all_defined_ops)}, "
+            f"extra={sorted(all_defined_ops - expected_ops)}"
         )
 
-    bridge_text = _bridge_text(root / manifest.bridge_source)
-    bridge_symbols = _bridge_symbols(bridge_text)
-    expected_bridge_symbols = set(manifest.symbols) | set(
-        manifest.capability_api_symbols
-    )
-    if bridge_symbols != expected_bridge_symbols:
-        errors.append(
-            "bridge symbols differ: "
-            f"missing={sorted(expected_bridge_symbols - bridge_symbols)}, "
-            f"extra={sorted(bridge_symbols - expected_bridge_symbols)}"
+    for operator in manifest.operators:
+        host_classes, host_registrations, tiling_registrations = _host_contract(
+            root, operator
         )
-    try:
-        bridge_capabilities = _bridge_capability_payload(bridge_text)
-    except ManifestError as error:
-        errors.append(str(error))
-    else:
-        if bridge_capabilities != manifest.capability_payload():
-            errors.append("bridge capability payload differs from operator manifest")
+        expected_op = {operator.op}
+        if host_classes != expected_op:
+            errors.append(
+                f"host class differs for {operator.op}: "
+                f"expected={sorted(expected_op)}, actual={sorted(host_classes)}"
+            )
+        if host_registrations != expected_op:
+            errors.append(
+                f"host OP_ADD differs for {operator.op}: "
+                f"expected={sorted(expected_op)}, actual={sorted(host_registrations)}"
+            )
+        if tiling_registrations != expected_op:
+            errors.append(
+                f"tiling registration differs for {operator.op}: "
+                f"expected={sorted(expected_op)}, actual={sorted(tiling_registrations)}"
+            )
+        kernel_entries = _kernel_contract(root, operator)
+        expected_entry = {operator.kernel_entry}
+        if kernel_entries != expected_entry:
+            errors.append(
+                f"kernel entry differs for {operator.op}: "
+                f"expected={sorted(expected_entry)}, actual={sorted(kernel_entries)}"
+            )
 
     cmake_kernels = _cmake_kernels(root / manifest.kernel_cmake)
     expected_cmake = {
@@ -363,6 +436,40 @@ def validate_manifest(
             "kernel CMake entries differ: "
             f"missing={sorted(expected_cmake - cmake_kernels)}, "
             f"extra={sorted(cmake_kernels - expected_cmake)}"
+        )
+
+    bridge_text = _read_text(root / manifest.bridge_source, "bridge source")
+    bridge_symbols = _bridge_symbols(bridge_text)
+    expected_bridge_symbols = set(manifest.symbols) | set(
+        manifest.capability_api_symbols
+    )
+    if bridge_symbols != expected_bridge_symbols:
+        errors.append(
+            "bridge symbols differ: "
+            f"missing={sorted(expected_bridge_symbols - bridge_symbols)}, "
+            f"extra={sorted(bridge_symbols - expected_bridge_symbols)}"
+        )
+    if _GENERATED_CAPABILITY_INCLUDE not in bridge_text:
+        errors.append("bridge must include aspy_capabilities.generated.h")
+    if _CAPABILITY_ABI_REFERENCE not in bridge_text:
+        errors.append("bridge ABI export must reference generated manifest metadata")
+    if _CAPABILITY_JSON_REFERENCE not in bridge_text:
+        errors.append("bridge capability export must reference generated manifest metadata")
+
+    bridge_includes, bridge_calls = _bridge_native_contract(bridge_text)
+    expected_includes = {operator.kernel_entry for operator in manifest.operators}
+    expected_calls = {operator.op for operator in manifest.operators}
+    if bridge_includes != expected_includes:
+        errors.append(
+            "bridge ACLNN includes differ: "
+            f"missing={sorted(expected_includes - bridge_includes)}, "
+            f"extra={sorted(bridge_includes - expected_includes)}"
+        )
+    if bridge_calls != expected_calls:
+        errors.append(
+            "bridge ACLNN calls differ: "
+            f"missing={sorted(expected_calls - bridge_calls)}, "
+            f"extra={sorted(bridge_calls - expected_calls)}"
         )
 
     if require_complete_native_tree:
@@ -382,12 +489,124 @@ def validate_manifest(
         if actual_native != expected_native:
             errors.append(
                 "native source coverage differs: "
-                f"missing={sorted(actual_native - expected_native)}, "
-                f"stale={sorted(expected_native - actual_native)}"
+                f"unlisted={sorted(actual_native - expected_native)}, "
+                f"missing={sorted(expected_native - actual_native)}"
             )
 
     if errors:
         raise ManifestError("\n".join(errors))
+
+
+def msopgen_commands(
+    manifest: OperatorManifest,
+    *,
+    msopgen: str,
+    project: Path,
+    soc: str = "ascend910b",
+    root: Path = ROOT,
+) -> tuple[tuple[str, ...], ...]:
+    """Return deterministic msopgen invocations derived only from the manifest."""
+
+    commands = []
+    for index, operator in enumerate(manifest.operators):
+        command = [
+            msopgen,
+            "gen",
+            "-i",
+            str(root / operator.definition),
+            "-f",
+            "aclnn",
+            "-c",
+            f"ai_core-{soc}",
+            "-out",
+            str(project),
+        ]
+        if index:
+            command.extend(("-m", "1"))
+        command.extend(("-op", operator.op, "-lan", "cpp"))
+        commands.append(tuple(command))
+    return tuple(commands)
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    destination.chmod(0o644)
+
+
+def stage_project(
+    manifest: OperatorManifest,
+    *,
+    root: Path,
+    project: Path,
+) -> None:
+    """Stage reviewed host/kernel sources and generated kernel registration."""
+
+    for operator in manifest.operators:
+        for relative in operator.host_sources:
+            _copy_file(root / relative, project / "op_host" / Path(relative).name)
+        _copy_file(
+            root / operator.kernel_source,
+            project / "op_kernel" / Path(operator.kernel_source).name,
+        )
+    cmake_text = _render_kernel_cmake(manifest)
+    cmake_path = project / "op_kernel" / "CMakeLists.txt"
+    cmake_path.parent.mkdir(parents=True, exist_ok=True)
+    cmake_path.write_text(cmake_text, encoding="utf-8")
+    cmake_path.chmod(0o644)
+
+
+def _render_kernel_cmake(manifest: OperatorManifest) -> str:
+    lines = [
+        "# Generated from native/aspy/operator_manifest.json by scripts/build_aspy.py.",
+        'if ("${CMAKE_BUILD_TYPE}x" STREQUAL "Debugx")',
+        "    add_ops_compile_options(ALL OPTIONS -g -O0 --cce-ignore-always-inline=true)",
+        "endif()",
+        "",
+    ]
+    lines.extend(
+        "add_kernel_compile("
+        f"{operator.op} ${{CMAKE_CURRENT_SOURCE_DIR}}/{Path(operator.kernel_source).name})"
+        for operator in manifest.operators
+    )
+    lines.extend(
+        (
+            "",
+            "if (ENABLE_TEST AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/testcases)",
+            "    add_subdirectory(testcases)",
+            "endif()",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def stage_bridge(
+    manifest: OperatorManifest,
+    *,
+    root: Path,
+    destination: Path,
+) -> None:
+    """Stage the bridge and generated ABI/capability metadata header."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    _copy_file(root / manifest.bridge_source, destination / Path(manifest.bridge_source).name)
+    setup_source = root / "native" / "aspy" / "bridge" / "setup.py"
+    _copy_file(setup_source, destination / setup_source.name)
+    capability_json = json.dumps(
+        manifest.capability_payload(), sort_keys=True, separators=(",", ":")
+    )
+    header = (
+        "#pragma once\n\n"
+        "// Generated from native/aspy/operator_manifest.json.\n"
+        f"inline constexpr int {_CAPABILITY_ABI_REFERENCE} = "
+        f"{manifest.aspy_abi_version};\n"
+        f"inline constexpr char {_CAPABILITY_JSON_REFERENCE}[] = R\"ASPY("
+        f"{capability_json})ASPY\";\n"
+    )
+    header_path = destination / "aspy_capabilities.generated.h"
+    header_path.write_text(header, encoding="utf-8")
+    header_path.chmod(0o644)
 
 
 def _emit_lines(values: Iterable[str]) -> str:
@@ -402,6 +621,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     output.add_argument("--symbols", action="store_true", help="emit operator symbols")
     output.add_argument("--definitions", action="store_true", help="emit definition paths")
     output.add_argument("--capabilities", action="store_true", help="emit capability JSON")
+    output.add_argument("--msopgen-plan", action="store_true", help="emit msopgen plan JSON")
+    output.add_argument("--stage-project", type=Path, help="stage host/kernel build inputs")
+    output.add_argument("--stage-bridge", type=Path, help="stage bridge build inputs")
+    parser.add_argument("--msopgen", default="msopgen")
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--soc", default="ascend910b")
     return parser.parse_args(argv)
 
 
@@ -428,6 +653,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 separators=(",", ":"),
             )
         )
+    elif args.msopgen_plan:
+        if args.project is None:
+            print("--msopgen-plan requires --project", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                msopgen_commands(
+                    manifest,
+                    msopgen=args.msopgen,
+                    project=args.project,
+                    soc=args.soc,
+                    root=ROOT,
+                ),
+                separators=(",", ":"),
+            )
+        )
+    elif args.stage_project is not None:
+        stage_project(manifest, root=ROOT, project=args.stage_project)
+    elif args.stage_bridge is not None:
+        stage_bridge(manifest, root=ROOT, destination=args.stage_bridge)
     else:
         print(f"validated {len(manifest.operators)} AsPy operators")
     return 0

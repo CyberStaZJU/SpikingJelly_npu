@@ -14,6 +14,8 @@ from spikingjelly_npu.routing import (
     ASPY_REASON_MALFORMED,
     ASPY_REASON_UNSUPPORTED_ABI,
     ASPY_REASON_UNSUPPORTED_SCHEMA,
+    AsPyCapabilities,
+    AsPyCapabilityGroup,
     ProviderRoute,
     StrictProviderError,
     accelerated_route,
@@ -270,10 +272,95 @@ def test_absent_bundle_probe_has_stable_reason_code():
     assert capabilities.reason_code == ASPY_REASON_ABSENT
 
 
-def test_bundle_load_failure_has_stable_reason_code():
+@pytest.mark.parametrize(
+    "error",
+    [OSError("missing linked library"), RuntimeError("broken loader")],
+)
+def test_present_but_unloadable_bundle_has_stable_reason_code(error):
     capabilities = probe_aspy_capabilities(
-        loader=lambda: (_ for _ in ()).throw(RuntimeError("broken loader"))
+        loader=lambda: (_ for _ in ()).throw(error)
     )
-    assert not capabilities.bundle_present
+    assert capabilities.bundle_present
     assert not capabilities.available
+    assert capabilities.source == "invalid"
     assert capabilities.reason_code == ASPY_REASON_LOAD_ERROR
+    assert "absent" not in capabilities.reason.lower()
+
+
+def test_capability_contract_rejects_contradictory_presence_states():
+    group = AsPyCapabilityGroup("if", ("if_forward", "if_backward"))
+    with pytest.raises(ValueError, match="must be present"):
+        AsPyCapabilities(
+            bundle_present=False,
+            available=True,
+            abi_version=1,
+            schema_version=1,
+            groups=(group,),
+            symbols=group.symbols,
+            source="declared",
+            reason_code=ASPY_REASON_DECLARED,
+            reason="contradictory",
+        )
+    with pytest.raises(ValueError, match="cannot expose capability groups"):
+        AsPyCapabilities(
+            bundle_present=True,
+            available=False,
+            abi_version=1,
+            schema_version=1,
+            groups=(group,),
+            symbols=group.symbols,
+            source="invalid",
+            reason_code=ASPY_REASON_MALFORMED,
+            reason="contradictory",
+        )
+
+
+def test_provider_route_rejects_contradictory_execution_states():
+    base = {
+        "requested_provider": "aspy",
+        "logical_operation": "sequence.test",
+        "reason_code": "aspy.test",
+        "reason": "test route",
+        "strict": False,
+        "mode": "eval",
+    }
+    with pytest.raises(ValueError, match="cannot be accelerated"):
+        ProviderRoute(
+            actual_provider="torch",
+            accelerated=True,
+            native_launch_attempted=False,
+            **base,
+        )
+    with pytest.raises(ValueError, match="cannot follow a native launch"):
+        ProviderRoute(
+            actual_provider="torch",
+            accelerated=False,
+            native_launch_attempted=True,
+            **base,
+        )
+    with pytest.raises(ValueError, match="requires accelerated=True"):
+        ProviderRoute(
+            actual_provider="aspy",
+            accelerated=False,
+            native_launch_attempted=True,
+            **base,
+        )
+    with pytest.raises(ValueError, match="requires native_launch_attempted=True"):
+        ProviderRoute(
+            actual_provider="aspy",
+            accelerated=True,
+            native_launch_attempted=False,
+            **base,
+        )
+    with pytest.raises(ValueError, match="cannot execute"):
+        ProviderRoute(
+            requested_provider="torch",
+            actual_provider="aspy",
+            logical_operation="sequence.test",
+            reason_code="aspy.test",
+            reason="test route",
+            accelerated=True,
+            strict=False,
+            mode="eval",
+            native_launch_attempted=True,
+        )

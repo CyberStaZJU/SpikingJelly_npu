@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE="$ROOT/native/aspy"
 PYTHON_BIN="${PYTHON:-python3}"
 STATE_ROOT="${SPIKINGJELLY_NPU_ASPY_BUILD_ROOT:-}"
 if [[ -z "$STATE_ROOT" ]]; then
@@ -194,118 +193,29 @@ CMAKE_VERSION="$(cmake --version | head -1)"
 COMPILER_VERSION="$(${CXX:-c++} --version 2>/dev/null | head -1 || printf unavailable)"
 MSOPGEN_VERSION="$($MSOPGEN --version 2>&1 | head -1 || printf unavailable)"
 
-"$PYTHON_BIN" "$ROOT/scripts/build_aspy.py" >/dev/null
+MANIFEST_HELPER="$ROOT/scripts/build_aspy.py"
+"$PYTHON_BIN" "$MANIFEST_HELPER" >/dev/null
+MSOPGEN_PLAN="$(
+  "$PYTHON_BIN" "$MANIFEST_HELPER" \
+    --msopgen-plan \
+    --msopgen "$MSOPGEN" \
+    --project "$PROJECT" \
+    --soc ascend910b
+)"
+"$PYTHON_BIN" - "$MSOPGEN_PLAN" <<'PY'
+import json
+import subprocess
+import sys
 
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_fedsnn_decay_lif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -op AsPyFedSNNDecayLifForward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_fedsnn_decay_lif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyFedSNNDecayLifBackward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_if_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyIfForward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_if_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyIfBackward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_lif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyLifForward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_lif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyLifBackward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_klif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyKlifForward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_klif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyKlifBackward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_plif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyPlifForward \
-  -lan cpp
-"$MSOPGEN" gen \
-  -i "$SOURCE/definition/aspy_plif_forward.json" \
-  -f aclnn \
-  -c ai_core-ascend910b \
-  -out "$PROJECT" \
-  -m 1 \
-  -op AsPyPlifBackward \
-  -lan cpp
-install -m 0644 "$SOURCE/op_host/as_py_fed_snn_decay_lif_forward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_fed_snn_decay_lif_forward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_fed_snn_decay_lif_backward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_fed_snn_decay_lif_backward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_if_forward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_if_forward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_if_backward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_if_backward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_lif_forward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_lif_forward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_lif_backward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_lif_backward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_klif_forward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_klif_forward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_klif_backward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_klif_backward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_plif_forward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_plif_forward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_plif_backward.cpp" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_host/as_py_plif_backward_tiling.h" "$PROJECT/op_host/"
-install -m 0644 "$SOURCE/op_kernel/as_py_fed_snn_decay_lif_forward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_fed_snn_decay_lif_backward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_if_forward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_if_backward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_lif_forward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_lif_backward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_klif_forward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_klif_backward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_plif_forward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/as_py_plif_backward.cpp" "$PROJECT/op_kernel/"
-install -m 0644 "$SOURCE/op_kernel/CMakeLists.txt" "$PROJECT/op_kernel/"
+commands = json.loads(sys.argv[1])
+if not isinstance(commands, list) or not commands:
+    raise SystemExit("AsPy manifest produced an empty msopgen plan")
+for command in commands:
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        raise SystemExit("AsPy manifest produced an invalid msopgen command")
+    subprocess.run(command, check=True)
+PY
+"$PYTHON_BIN" "$MANIFEST_HELPER" --stage-project "$PROJECT"
 
 cmake -S "$PROJECT" -B "$BUILD" \
   -DASCEND_COMPUTE_UNIT=ascend910b \
@@ -313,9 +223,7 @@ cmake -S "$PROJECT" -B "$BUILD" \
   -DASCEND_CANN_PACKAGE_PATH="$ASCEND_TOOLKIT_HOME"
 cmake --build "$BUILD" --target install -- -j
 
-mkdir -p "$BRIDGE_SOURCE"
-install -m 0644 "$SOURCE/bridge/aspy_bridge.cpp" "$BRIDGE_SOURCE/"
-install -m 0644 "$SOURCE/bridge/setup.py" "$BRIDGE_SOURCE/"
+"$PYTHON_BIN" "$MANIFEST_HELPER" --stage-bridge "$BRIDGE_SOURCE"
 (
   cd "$BRIDGE_SOURCE"
   SPIKINGJELLY_NPU_ASPY_OP_API="$INSTALL/op_api" \
@@ -335,46 +243,51 @@ export LD_LIBRARY_PATH="$INSTALL/op_api/lib:$ASCEND_TOOLKIT_HOME/aarch64-linux/l
 export SPIKINGJELLY_NPU_ASPY_EXPECT_NATIVE=1
 EOF
 chmod 0600 "$ENV_FILE"
+EXPECTED_CAPABILITIES_JSON="$(
+  "$PYTHON_BIN" "$MANIFEST_HELPER" --capabilities
+)"
 CAPABILITIES_JSON="$(
   PYTHONPATH="$ROOT/src:$EXTENSION_DIR${PYTHONPATH:+:$PYTHONPATH}" \
   LD_LIBRARY_PATH="$INSTALL/op_api/lib:$ASCEND_TOOLKIT_HOME/aarch64-linux/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-  "$PYTHON_BIN" - <<'PY'
+  "$PYTHON_BIN" - "$EXPECTED_CAPABILITIES_JSON" <<'PY'
 import importlib
 import json
+import sys
 
 import torch  # noqa: F401
 import torch_npu  # noqa: F401
 
+expected = json.loads(sys.argv[1])
 module = importlib.import_module("_spikingjelly_npu_aspy")
-if module.aspy_abi_version() != 1:
-    raise SystemExit("built AsPy extension reported an unexpected ABI version")
-capabilities = json.loads(module.aspy_capabilities())
-if capabilities.get("schema_version") != 1:
-    raise SystemExit("built AsPy extension reported an unexpected capability schema")
-required = (
-    "if_forward",
-    "if_backward",
-    "lif_forward",
-    "lif_backward",
-    "klif_forward",
-    "klif_backward",
-    "plif_forward",
-    "plif_backward",
-    "fedsnn_decay_lif_forward",
-    "fedsnn_decay_lif_backward",
-)
-missing = [name for name in required if not callable(getattr(module, name, None))]
+actual_abi = module.aspy_abi_version()
+if actual_abi != expected["aspy_abi_version"]:
+    raise SystemExit(
+        "built AsPy extension reported an unexpected ABI version: "
+        f"expected={expected['aspy_abi_version']}, actual={actual_abi}"
+    )
+actual_capabilities = json.loads(module.aspy_capabilities())
+expected_capabilities = {
+    key: expected[key]
+    for key in ("schema_version", "capabilities", "symbols")
+}
+if actual_capabilities != expected_capabilities:
+    raise SystemExit(
+        "built AsPy extension capability payload does not match the operator manifest"
+    )
+missing = [
+    name
+    for name in expected["symbols"]
+    if not callable(getattr(module, name, None))
+]
 if missing:
     raise SystemExit(f"built AsPy extension is missing required symbols: {missing}")
-if set(capabilities.get("symbols", ())) != set(required):
-    raise SystemExit("built AsPy extension capability symbols do not match required symbols")
 print(
     json.dumps(
         {
-            "abi_version": module.aspy_abi_version(),
-            "capability_schema_version": capabilities["schema_version"],
-            "groups": capabilities["capabilities"],
-            "required_symbols": list(required),
+            "abi_version": actual_abi,
+            "capability_schema_version": actual_capabilities["schema_version"],
+            "groups": actual_capabilities["capabilities"],
+            "required_symbols": actual_capabilities["symbols"],
         },
         sort_keys=True,
     )

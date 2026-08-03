@@ -101,7 +101,11 @@ class FedSNNDecayLIF(nn.Module):
         self.backend = backend
         self.backend_strict = bool(backend_strict)
         self.last_backend_route = _aspy.eager_route(
-            backend, "backend has not executed yet"
+            backend,
+            "backend has not executed yet",
+            logical_operation="fedsnn.decay_lif",
+            reason_code="route.not_executed",
+            training=self.training,
         )
 
     def _torch_forward(self, current_seq: Tensor) -> Tensor:
@@ -128,6 +132,9 @@ class FedSNNDecayLIF(nn.Module):
             self.last_backend_route = _aspy.eager_route(
                 self.backend,
                 f"backend={self.backend!r} uses the exact PyTorch implementation",
+                logical_operation="fedsnn.decay_lif",
+                reason_code="torch.explicit",
+                training=self.training,
             )
             return self._torch_forward(current_seq)
 
@@ -137,6 +144,8 @@ class FedSNNDecayLIF(nn.Module):
             v_threshold=self.v_threshold,
             surrogate_function=self.surrogate_function,
             strict=self.backend_strict,
+            training=self.training,
+            requested_backend=self.backend,
         )
         self.last_backend_route = route
         if spike_seq is None:

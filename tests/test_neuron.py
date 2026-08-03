@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from spikingjelly_npu.activation_based import _aspy, functional, neuron, surrogate
+from spikingjelly_npu.routing import ProviderRoute
 
 
 def test_ifnode_hard_reset_multi_step_and_voltage_sequence():
@@ -114,7 +115,14 @@ def test_aspy_cpu_fallback_matches_torch_forward_state_and_gradient():
     torch.testing.assert_close(x_aspy.grad, x_torch.grad)
     assert aspy_node.backend == "aspy"
     assert aspy_node.last_backend_route.requested_backend == "aspy"
+    assert isinstance(aspy_node.last_backend_route, ProviderRoute)
+    assert isinstance(aspy_node.last_backend_route, _aspy.AsPyRoute)
     assert aspy_node.last_backend_route.backend == "torch"
+    assert aspy_node.last_backend_route.logical_operation == (
+        "activation_based.neuron.if.multi_step"
+    )
+    assert aspy_node.last_backend_route.reason_code == "aspy.if.unsupported_request"
+    assert not aspy_node.last_backend_route.native_launch_attempted
     assert not aspy_node.last_backend_route.accelerated
     assert "requires an NPU tensor" in aspy_node.last_backend_route.reason
 
@@ -176,10 +184,14 @@ def test_aspy_strict_mode_rejects_cpu_before_extension_loading(monkeypatch):
     )
     node = neuron.IFNode(backend="aspy", backend_strict=True, step_mode="m")
 
-    with pytest.raises(_aspy.AsPyBackendError, match="requires an NPU tensor"):
+    with pytest.raises(_aspy.AsPyBackendError, match="requires an NPU tensor") as captured:
         node(torch.ones(2, 1, 1))
 
     assert load_calls == []
+    assert isinstance(captured.value.route, ProviderRoute)
+    assert captured.value.route.actual_provider is None
+    assert captured.value.route.strict
+    assert not captured.value.route.native_launch_attempted
 
 
 def test_aspy_single_step_uses_torch_route_without_strict_rejection():
@@ -196,6 +208,17 @@ def test_if_lif_and_parametric_lif_advertise_aspy():
     assert "aspy" in neuron.IFNode().supported_backends
     assert "aspy" in neuron.LIFNode().supported_backends
     assert "aspy" in neuron.ParametricLIFNode().supported_backends
+
+
+def test_aspy_route_helper_keeps_historical_display_name_api():
+    route = _aspy.native_route("IF")
+
+    assert isinstance(route, ProviderRoute)
+    assert isinstance(route, _aspy.AsPyRoute)
+    assert route.requested_backend == "aspy"
+    assert route.backend == "aspy"
+    assert route.reason == "Ascend C fused multi-step IF kernel"
+    assert route.accelerated
 
 
 def test_aspy_commits_validated_extension_result(monkeypatch):
@@ -226,8 +249,97 @@ def test_aspy_commits_validated_extension_result(monkeypatch):
     assert output is spike_seq
     assert node.v is v_final
     assert node.v_seq is v_seq
+    assert isinstance(node.last_backend_route, ProviderRoute)
+    assert isinstance(node.last_backend_route, _aspy.AsPyRoute)
     assert node.last_backend_route.backend == "aspy"
+    assert node.last_backend_route.reason_code == "aspy.if.native"
+    assert node.last_backend_route.native_launch_attempted
     assert node.last_backend_route.accelerated
+
+
+def test_cupy_alias_is_preserved_in_native_route_metadata(monkeypatch):
+    node = neuron.IFNode(
+        backend="cupy",
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(2, 1, 1)
+    spike_seq = torch.ones_like(x)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (
+            SimpleNamespace(
+                if_multi_step=lambda *args: (
+                    spike_seq,
+                    torch.zeros_like(x[0]),
+                    None,
+                )
+            ),
+            None,
+        ),
+    )
+
+    assert node(x) is spike_seq
+    assert node.last_backend_route.requested_provider == "cupy"
+    assert node.last_backend_route.actual_provider == "aspy"
+    assert node.last_backend_route.native_launch_attempted
+
+
+def test_declared_partial_bundle_is_not_reinferred_from_adapter_methods(monkeypatch):
+    module = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: {
+            "schema_version": 1,
+            "capabilities": {"if": ["if_backward", "if_forward"]},
+            "symbols": ["if_backward", "if_forward"],
+        },
+        if_multi_step=lambda *args: (_ for _ in ()).throw(
+            AssertionError("partial bundle must not launch")
+        ),
+    )
+    node = neuron.IFNode(
+        backend="aspy",
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(2, 1, 1)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (module, _aspy._adapter_capabilities(module)),
+    )
+
+    output = node(x)
+
+    assert output.shape == x.shape
+    assert node.last_backend_route.backend == "torch"
+    assert node.last_backend_route.reason_code == "aspy.if.unsupported_bundle"
+    assert not node.last_backend_route.native_launch_attempted
+
+
+def test_aspy_unloadable_bundle_route_is_not_reported_absent(monkeypatch):
+    node = neuron.IFNode(
+        backend="aspy",
+        step_mode="m",
+        surrogate_function=surrogate.ATan(),
+    )
+    x = torch.zeros(2, 1, 1)
+    monkeypatch.setattr(_aspy, "_unsupported_reason", lambda *args: None)
+    monkeypatch.setattr(
+        _aspy,
+        "_load_extension",
+        lambda: (None, OSError("libcust_opapi.so could not be loaded")),
+    )
+
+    output = node(x)
+
+    assert output.shape == x.shape
+    assert node.last_backend_route.reason_code == "aspy.bundle.load_error"
+    assert "unloadable" in node.last_backend_route.reason
+    assert "absent" not in node.last_backend_route.reason.lower()
 
 
 def test_aspy_lif_commits_validated_extension_result(monkeypatch):

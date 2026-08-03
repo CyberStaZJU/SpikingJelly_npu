@@ -38,12 +38,16 @@ class BaseNode(base.MemoryModule):
         )
         self.detach_reset = bool(detach_reset)
         self.backend_strict = bool(backend_strict)
-        self.last_backend_route = _aspy.eager_route(
-            backend, "backend has not executed yet"
-        )
         self.step_mode = step_mode
         self.backend = backend
         self.store_v_seq = store_v_seq
+        self.last_backend_route = _aspy.eager_route(
+            self.requested_backend,
+            "backend has not executed yet",
+            logical_operation="activation_based.neuron.pending",
+            reason_code="route.not_executed",
+            training=self.training,
+        )
 
     @property
     def supported_backends(self) -> Tuple[str, ...]:
@@ -105,7 +109,11 @@ class BaseNode(base.MemoryModule):
         if x_seq.ndim < 2:
             raise ValueError(f"expected [T, N, ...], got shape={tuple(x_seq.shape)}")
         self.last_backend_route = _aspy.eager_route(
-            self.backend, f"backend={self.backend!r} uses the PyTorch implementation"
+            self.requested_backend,
+            f"backend={self.backend!r} uses the PyTorch implementation",
+            logical_operation="activation_based.neuron.multi_step",
+            reason_code="torch.explicit",
+            training=self.training,
         )
         return self._torch_multi_step_forward(x_seq)
 
@@ -131,7 +139,11 @@ class IFNode(BaseNode):
     def single_step_forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.backend == "aspy":
             self.last_backend_route = _aspy.eager_route(
-                "aspy", "AsPy acceleration currently supports only single-step fallback"
+                self.requested_backend,
+                "AsPy acceleration currently supports only single-step fallback",
+                logical_operation="activation_based.neuron.if.single_step",
+                reason_code="aspy.if.single_step_fallback",
+                training=self.training,
             )
         return super().single_step_forward(x)
 
@@ -151,6 +163,8 @@ class IFNode(BaseNode):
             surrogate_function=self.surrogate_function,
             store_v_seq=self.store_v_seq,
             strict=self.backend_strict,
+            training=self.training,
+            requested_backend=self.requested_backend,
         )
         self.last_backend_route = route
         if result is None:
@@ -208,7 +222,11 @@ class LIFNode(BaseNode):
     def single_step_forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.backend == "aspy":
             self.last_backend_route = _aspy.eager_route(
-                "aspy", "AsPy LIF acceleration supports multi-step only; using PyTorch single-step"
+                self.requested_backend,
+                "AsPy LIF acceleration supports multi-step only; using PyTorch single-step",
+                logical_operation="activation_based.neuron.lif.single_step",
+                reason_code="aspy.lif.single_step_fallback",
+                training=self.training,
             )
         return super().single_step_forward(x)
 
@@ -230,6 +248,8 @@ class LIFNode(BaseNode):
             tau=self.tau,
             decay_input=self.decay_input,
             strict=self.backend_strict,
+            training=self.training,
+            requested_backend=self.requested_backend,
         )
         self.last_backend_route = route
         if result is None:
@@ -302,9 +322,19 @@ class KLIFNode(LIFNode):
         if self.backend == "aspy":
             reason = "AsPy KLIF acceleration supports multi-step only"
             if self.backend_strict:
-                raise _aspy.AsPyBackendError(reason)
+                _aspy._strict_rejection(
+                    "klif",
+                    reason_code="aspy.klif.single_step_strict",
+                    reason=reason,
+                    training=self.training,
+                    requested_backend=self.requested_backend,
+                )
             self.last_backend_route = _aspy.eager_route(
-                "aspy", f"{reason}; using PyTorch single-step"
+                self.requested_backend,
+                f"{reason}; using PyTorch single-step",
+                logical_operation="activation_based.neuron.klif.single_step",
+                reason_code="aspy.klif.single_step_fallback",
+                training=self.training,
             )
         return BaseNode.single_step_forward(self, x)
 
@@ -329,6 +359,8 @@ class KLIFNode(LIFNode):
             decay_input=self.decay_input,
             scale_reset=self.scale_reset,
             strict=self.backend_strict,
+            training=self.training,
+            requested_backend=self.requested_backend,
         )
         self.last_backend_route = route
         if result is None:
@@ -389,8 +421,11 @@ class ParametricLIFNode(BaseNode):
     def single_step_forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.backend == "aspy":
             self.last_backend_route = _aspy.eager_route(
-                "aspy",
+                self.requested_backend,
                 "AsPy PLIF acceleration supports multi-step only; using PyTorch single-step",
+                logical_operation="activation_based.neuron.plif.single_step",
+                reason_code="aspy.plif.single_step_fallback",
+                training=self.training,
             )
         return super().single_step_forward(x)
 
@@ -413,6 +448,8 @@ class ParametricLIFNode(BaseNode):
             store_v_seq=self.store_v_seq,
             decay_input=self.decay_input,
             strict=self.backend_strict,
+            training=self.training,
+            requested_backend=self.requested_backend,
         )
         self.last_backend_route = route
         if result is None:

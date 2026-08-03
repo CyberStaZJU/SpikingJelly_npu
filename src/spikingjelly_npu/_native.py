@@ -34,6 +34,13 @@ def _extension_candidates(root: Path) -> list[Path]:
     return list(dict.fromkeys(candidates))
 
 
+def _direct_extension_present() -> bool:
+    try:
+        return importlib.util.find_spec(_EXTENSION_NAME) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
 def load_aspy_native() -> ModuleType:
     """Load the source-build extension or a relocatable installed bundle.
 
@@ -41,33 +48,51 @@ def load_aspy_native() -> ModuleType:
     request. It may therefore import ``torch_npu`` and load CANN-linked shared
     libraries without changing ordinary package-import safety.
     """
+    direct_present = _direct_extension_present()
     try:
         return importlib.import_module(_EXTENSION_NAME)
-    except (ImportError, OSError) as direct_error:
-        root = _bundle_root()
-        library = root / "lib" / "libcust_opapi.so"
-        candidates = _extension_candidates(root)
-        if not library.is_file() or len(candidates) != 1:
+    except ImportError as error:
+        direct_error: ImportError | OSError = error
+        direct_was_absent = not direct_present
+    except OSError as error:
+        direct_error = error
+        direct_was_absent = False
+    except Exception as error:
+        raise OSError(
+            "AsPy native extension discovery failed while loading a present or "
+            f"misconfigured runtime: {error}"
+        ) from error
+
+    root = _bundle_root()
+    library = root / "lib" / "libcust_opapi.so"
+    candidates = _extension_candidates(root)
+    if not library.is_file() or len(candidates) != 1:
+        if direct_was_absent:
             raise ImportError(
                 "AsPy native extension is unavailable. Expected either a source-build "
                 f"module on sys.path or one release bundle under {root}. "
                 f"Direct import error: {direct_error}"
             ) from direct_error
+        raise OSError(
+            "AsPy native extension is present on sys.path but could not be loaded, "
+            f"and no complete relocatable bundle exists under {root}. "
+            f"Direct load error: {direct_error}"
+        ) from direct_error
 
-        # Importing torch-npu first makes the torch/c10/NPU shared libraries
-        # available before the standalone extension is loaded.
-        importlib.import_module("torch_npu")
-        ctypes.CDLL(str(library), mode=ctypes.RTLD_GLOBAL)
+    # Importing torch-npu first makes the torch/c10/NPU shared libraries
+    # available before the standalone extension is loaded.
+    importlib.import_module("torch_npu")
+    ctypes.CDLL(str(library), mode=ctypes.RTLD_GLOBAL)
 
-        extension_path = candidates[0]
-        spec = importlib.util.spec_from_file_location(_EXTENSION_NAME, extension_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(
-                f"could not create an extension spec for {extension_path}"
-            ) from direct_error
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+    extension_path = candidates[0]
+    spec = importlib.util.spec_from_file_location(_EXTENSION_NAME, extension_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"could not create an extension spec for {extension_path}"
+        ) from direct_error
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 __all__ = ["load_aspy_native"]

@@ -50,6 +50,33 @@ def install_fake_native(
     return importlib.import_module("spikingjelly_npu_aspy")
 
 
+def test_aspy_adapter_exposes_native_capability_contract(monkeypatch):
+    payload = '{"schema_version":1,"capabilities":{},"symbols":[]}'
+    native = SimpleNamespace(
+        aspy_abi_version=lambda: 1,
+        aspy_capabilities=lambda: payload,
+        if_forward=lambda *args: None,
+        if_backward=lambda *args: None,
+        lif_forward=lambda *args: None,
+        lif_backward=lambda *args: None,
+        plif_forward=lambda *args: None,
+        plif_backward=lambda *args: None,
+        klif_forward=lambda *args: None,
+        klif_backward=lambda *args: None,
+        fedsnn_decay_lif_forward=lambda *args: None,
+        fedsnn_decay_lif_backward=lambda *args: None,
+    )
+    monkeypatch.setitem(sys.modules, "_spikingjelly_npu_aspy", native)
+    sys.modules.pop("spikingjelly_npu_aspy", None)
+
+    adapter = importlib.import_module("spikingjelly_npu_aspy")
+
+    assert adapter.aspy_abi_version is native.aspy_abi_version
+    assert adapter.aspy_capabilities is native.aspy_capabilities
+    assert adapter.aspy_abi_version() == 1
+    assert adapter.aspy_capabilities() == payload
+
+
 def test_aspy_adapter_imports_older_native_without_fedsnn_symbols(monkeypatch):
     adapter = install_fake_native(
         monkeypatch,

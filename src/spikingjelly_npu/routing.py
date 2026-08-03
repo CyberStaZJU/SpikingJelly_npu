@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Any, NoReturn
 
-REQUESTED_PROVIDERS = ("torch", "vendor", "aspy", "auto")
+REQUESTED_PROVIDERS = ("torch", "vendor", "aspy", "auto", "npu", "cupy")
 ACTUAL_PROVIDERS = ("torch", "vendor", "aspy")
 ROUTE_MODES = ("train", "eval")
 
@@ -171,9 +171,38 @@ class ProviderRoute:
         if self.actual_provider is None:
             if not self.strict:
                 raise ValueError("actual_provider=None is reserved for strict rejection")
+            if self.requested_provider not in {"vendor", "aspy", "auto", "npu", "cupy"}:
+                raise ValueError(
+                    "a strict provider rejection requires an accelerator-capable request"
+                )
             if self.accelerated or self.native_launch_attempted:
                 raise ValueError(
                     "a pre-execution strict rejection cannot be accelerated or launch native code"
+                )
+        elif self.actual_provider == "torch":
+            if self.accelerated:
+                raise ValueError("actual_provider='torch' cannot be accelerated")
+            if self.native_launch_attempted:
+                raise ValueError(
+                    "a PyTorch route cannot follow a native launch; native failures must propagate"
+                )
+        else:
+            allowed_actual = {
+                "vendor": {"vendor", "auto", "npu"},
+                "aspy": {"aspy", "auto", "npu", "cupy"},
+            }
+            if self.requested_provider not in allowed_actual[self.actual_provider]:
+                raise ValueError(
+                    f"requested_provider={self.requested_provider!r} cannot execute "
+                    f"actual_provider={self.actual_provider!r}"
+                )
+            if not self.accelerated:
+                raise ValueError(
+                    "actual_provider='vendor' or 'aspy' requires accelerated=True"
+                )
+            if not self.native_launch_attempted:
+                raise ValueError(
+                    "an accelerated route requires native_launch_attempted=True"
                 )
 
     @property
@@ -387,8 +416,23 @@ class AsPyCapabilities:
             raise ValueError(f"invalid capability reason code {reason_code!r}")
         object.__setattr__(self, "reason_code", reason_code)
         object.__setattr__(self, "reason", _nonempty_string(self.reason, "reason"))
-        if self.available and not groups:
-            raise ValueError("an available AsPy bundle must expose a capability group")
+        if self.available:
+            if not self.bundle_present:
+                raise ValueError("an available AsPy bundle must be present")
+            if not groups:
+                raise ValueError("an available AsPy bundle must expose a capability group")
+            if source not in {"declared", "legacy"}:
+                raise ValueError("an available AsPy bundle must be declared or legacy")
+        elif groups:
+            raise ValueError("an unavailable AsPy bundle cannot expose capability groups")
+        if not self.bundle_present and source != "absent":
+            raise ValueError("bundle_present=False requires source='absent'")
+        if source == "absent" and (self.bundle_present or self.available):
+            raise ValueError("an absent AsPy bundle cannot be present or available")
+        if self.reason_code == ASPY_REASON_ABSENT and source != "absent":
+            raise ValueError("ASPY_REASON_ABSENT requires source='absent'")
+        if self.reason_code == ASPY_REASON_LOAD_ERROR and source != "invalid":
+            raise ValueError("ASPY_REASON_LOAD_ERROR requires source='invalid'")
         object.__setattr__(self, "groups", groups)
         object.__setattr__(self, "symbols", symbols)
 
@@ -695,7 +739,7 @@ def probe_aspy_capabilities(
         selected_loader = _default_aspy_loader if loader is None else loader
         try:
             module = selected_loader()
-        except (ImportError, OSError) as error:
+        except ImportError as error:
             return _capability_result(
                 bundle_present=False,
                 available=False,
@@ -703,15 +747,25 @@ def probe_aspy_capabilities(
                 schema_version=None,
                 source="absent",
                 reason_code=ASPY_REASON_ABSENT,
-                reason=f"AsPy bundle is unavailable: {error}",
+                reason=f"AsPy bundle is absent: {error}",
             )
-        except Exception as error:
+        except OSError as error:
             return _capability_result(
-                bundle_present=False,
+                bundle_present=True,
                 available=False,
                 abi_version=None,
                 schema_version=None,
-                source="absent",
+                source="invalid",
+                reason_code=ASPY_REASON_LOAD_ERROR,
+                reason=f"AsPy bundle is present but unloadable: {error}",
+            )
+        except Exception as error:
+            return _capability_result(
+                bundle_present=True,
+                available=False,
+                abi_version=None,
+                schema_version=None,
+                source="invalid",
                 reason_code=ASPY_REASON_LOAD_ERROR,
                 reason=f"AsPy bundle loading failed: {error}",
             )

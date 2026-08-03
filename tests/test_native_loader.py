@@ -8,6 +8,7 @@ from spikingjelly_npu import _native
 
 def test_native_loader_reports_missing_bundle(monkeypatch, tmp_path):
     monkeypatch.setattr(_native, "_bundle_root", lambda: tmp_path)
+    monkeypatch.setattr(_native, "_direct_extension_present", lambda: False)
     monkeypatch.setattr(
         _native.importlib,
         "import_module",
@@ -17,7 +18,34 @@ def test_native_loader_reports_missing_bundle(monkeypatch, tmp_path):
         _native.load_aspy_native()
 
 
+def test_native_loader_preserves_direct_unloadable_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(_native, "_bundle_root", lambda: tmp_path)
+    monkeypatch.setattr(_native, "_direct_extension_present", lambda: True)
+    monkeypatch.setattr(
+        _native.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(OSError("libascend missing")),
+    )
+
+    with pytest.raises(OSError, match="present on sys.path but could not be loaded"):
+        _native.load_aspy_native()
+
+
+def test_native_loader_preserves_present_import_error_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(_native, "_bundle_root", lambda: tmp_path)
+    monkeypatch.setattr(_native, "_direct_extension_present", lambda: True)
+    monkeypatch.setattr(
+        _native.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(ImportError("linked dependency missing")),
+    )
+
+    with pytest.raises(OSError, match="present on sys.path but could not be loaded"):
+        _native.load_aspy_native()
+
+
 def test_native_loader_uses_relocatable_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(_native, "_direct_extension_present", lambda: False)
     python_dir = tmp_path / "python"
     library_dir = tmp_path / "lib"
     python_dir.mkdir()
