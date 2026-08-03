@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "aclnn_as_py_fed_snn_decay_lif_backward.h"
@@ -939,6 +940,13 @@ std::vector<at::Tensor> klif_backward(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("aspy_abi_version", []() { return 1; });
+  module.def(
+      "aspy_capabilities",
+      []() {
+        return std::string(
+            R"({"capabilities":{"fedsnn_decay_lif":["fedsnn_decay_lif_backward","fedsnn_decay_lif_forward"],"if":["if_backward","if_forward"],"klif":["klif_backward","klif_forward"],"lif":["lif_backward","lif_forward"],"plif":["plif_backward","plif_forward"]},"schema_version":1,"symbols":["fedsnn_decay_lif_backward","fedsnn_decay_lif_forward","if_backward","if_forward","klif_backward","klif_forward","lif_backward","lif_forward","plif_backward","plif_forward"]})");
+      });
   module.def(
       "fedsnn_decay_lif_forward",
       &fedsnn_decay_lif_forward,

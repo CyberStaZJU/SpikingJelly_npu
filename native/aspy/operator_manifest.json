@@ -1,0 +1,142 @@
+{
+  "aspy_abi_version": 1,
+  "bridge_source": "native/aspy/bridge/aspy_bridge.cpp",
+  "capabilities": [
+    {
+      "definition": "native/aspy/definition/aspy_fedsnn_decay_lif_forward.json",
+      "name": "fedsnn_decay_lif",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_fed_snn_decay_lif_forward.cpp",
+            "native/aspy/op_host/as_py_fed_snn_decay_lif_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_fed_snn_decay_lif_forward.cpp",
+          "op": "AsPyFedSNNDecayLifForward",
+          "symbol": "fedsnn_decay_lif_forward"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_fed_snn_decay_lif_backward.cpp",
+            "native/aspy/op_host/as_py_fed_snn_decay_lif_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_fed_snn_decay_lif_backward.cpp",
+          "op": "AsPyFedSNNDecayLifBackward",
+          "symbol": "fedsnn_decay_lif_backward"
+        }
+      ]
+    },
+    {
+      "definition": "native/aspy/definition/aspy_if_forward.json",
+      "name": "if",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_if_forward.cpp",
+            "native/aspy/op_host/as_py_if_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_if_forward.cpp",
+          "op": "AsPyIfForward",
+          "symbol": "if_forward"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_if_backward.cpp",
+            "native/aspy/op_host/as_py_if_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_if_backward.cpp",
+          "op": "AsPyIfBackward",
+          "symbol": "if_backward"
+        }
+      ]
+    },
+    {
+      "definition": "native/aspy/definition/aspy_lif_forward.json",
+      "name": "lif",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_lif_forward.cpp",
+            "native/aspy/op_host/as_py_lif_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_lif_forward.cpp",
+          "op": "AsPyLifForward",
+          "symbol": "lif_forward"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_lif_backward.cpp",
+            "native/aspy/op_host/as_py_lif_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_lif_backward.cpp",
+          "op": "AsPyLifBackward",
+          "symbol": "lif_backward"
+        }
+      ]
+    },
+    {
+      "definition": "native/aspy/definition/aspy_klif_forward.json",
+      "name": "klif",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_klif_forward.cpp",
+            "native/aspy/op_host/as_py_klif_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_klif_forward.cpp",
+          "op": "AsPyKlifForward",
+          "symbol": "klif_forward"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_klif_backward.cpp",
+            "native/aspy/op_host/as_py_klif_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_klif_backward.cpp",
+          "op": "AsPyKlifBackward",
+          "symbol": "klif_backward"
+        }
+      ]
+    },
+    {
+      "definition": "native/aspy/definition/aspy_plif_forward.json",
+      "name": "plif",
+      "operators": [
+        {
+          "direction": "forward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_plif_forward.cpp",
+            "native/aspy/op_host/as_py_plif_forward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_plif_forward.cpp",
+          "op": "AsPyPlifForward",
+          "symbol": "plif_forward"
+        },
+        {
+          "direction": "backward",
+          "host_sources": [
+            "native/aspy/op_host/as_py_plif_backward.cpp",
+            "native/aspy/op_host/as_py_plif_backward_tiling.h"
+          ],
+          "kernel_source": "native/aspy/op_kernel/as_py_plif_backward.cpp",
+          "op": "AsPyPlifBackward",
+          "symbol": "plif_backward"
+        }
+      ]
+    }
+  ],
+  "capability_api_symbols": [
+    "aspy_abi_version",
+    "aspy_capabilities"
+  ],
+  "kernel_cmake": "native/aspy/op_kernel/CMakeLists.txt",
+  "schema_version": 1
+}

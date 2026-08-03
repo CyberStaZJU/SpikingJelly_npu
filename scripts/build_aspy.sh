@@ -194,6 +194,8 @@ CMAKE_VERSION="$(cmake --version | head -1)"
 COMPILER_VERSION="$(${CXX:-c++} --version 2>/dev/null | head -1 || printf unavailable)"
 MSOPGEN_VERSION="$($MSOPGEN --version 2>&1 | head -1 || printf unavailable)"
 
+"$PYTHON_BIN" "$ROOT/scripts/build_aspy.py" >/dev/null
+
 "$MSOPGEN" gen \
   -i "$SOURCE/definition/aspy_fedsnn_decay_lif_forward.json" \
   -f aclnn \
@@ -344,6 +346,11 @@ import torch  # noqa: F401
 import torch_npu  # noqa: F401
 
 module = importlib.import_module("_spikingjelly_npu_aspy")
+if module.aspy_abi_version() != 1:
+    raise SystemExit("built AsPy extension reported an unexpected ABI version")
+capabilities = json.loads(module.aspy_capabilities())
+if capabilities.get("schema_version") != 1:
+    raise SystemExit("built AsPy extension reported an unexpected capability schema")
 required = (
     "if_forward",
     "if_backward",
@@ -359,7 +366,19 @@ required = (
 missing = [name for name in required if not callable(getattr(module, name, None))]
 if missing:
     raise SystemExit(f"built AsPy extension is missing required symbols: {missing}")
-print(json.dumps({"required_symbols": list(required)}, sort_keys=True))
+if set(capabilities.get("symbols", ())) != set(required):
+    raise SystemExit("built AsPy extension capability symbols do not match required symbols")
+print(
+    json.dumps(
+        {
+            "abi_version": module.aspy_abi_version(),
+            "capability_schema_version": capabilities["schema_version"],
+            "groups": capabilities["capabilities"],
+            "required_symbols": list(required),
+        },
+        sort_keys=True,
+    )
+)
 PY
 )"
 "$PYTHON_BIN" - \
