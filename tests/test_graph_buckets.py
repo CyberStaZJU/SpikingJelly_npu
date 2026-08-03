@@ -12,9 +12,13 @@ from spikingjelly_npu.npu import (
 from spikingjelly_npu.npu import (
     GraphBucketSpec as ExportedGraphBucketSpec,
 )
+from spikingjelly_npu.npu import (
+    GraphPreExecutionError as ExportedGraphPreExecutionError,
+)
 from spikingjelly_npu.npu.graph import (
     GraphBucketRunner,
     GraphBucketSpec,
+    GraphPreExecutionError,
     StaticGraphRunner,
     _CaptureStateError,
 )
@@ -144,7 +148,78 @@ def test_nested_tuple_state_kwargs_mask_and_five_changed_replays(monkeypatch):
     assert len(sample_args) == 4
 
 
-def test_keyword_order_is_canonical_but_static_values_are_exact(monkeypatch):
+def test_keyword_order_is_exact_for_capture_replay_and_unknown_fallback(monkeypatch):
+    class KeywordOrderModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def __init__(self):
+            super().__init__()
+            self.observed_orders = []
+
+        def forward(self, inputs, **kwargs):
+            order = tuple(kwargs)
+            self.observed_orders.append(order)
+            offset = {("left", "right"): 1.0, ("right", "left"): 2.0}[order]
+            return inputs + offset
+
+    model = KeywordOrderModel().eval()
+    sample = torch.zeros(2, 3)
+    runner = GraphBucketRunner(
+        model,
+        [GraphBucketSpec((sample,), {"left": 1, "right": 2})],
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    first = runner(sample, left=1, right=2)
+    second = runner(torch.ones_like(sample), left=1, right=2)
+    assert_same(first, torch.ones_like(sample))
+    assert_same(second, torch.full_like(sample, 2.0))
+    assert model.observed_orders == [("left", "right"), ("left", "right")]
+    assert runner.last_route.backend == "npugraph"
+    assert len(fake_npu.capture_calls) == 1
+
+    fallback = runner(sample, right=2, left=1)
+    assert_same(fallback, torch.full_like(sample, 2.0))
+    assert model.observed_orders[-1] == ("right", "left")
+    assert runner.last_route.backend == "eager"
+    assert "allowlist" in runner.last_route.reason
+    assert len(fake_npu.capture_calls) == 1
+
+
+def test_different_keyword_orders_are_distinct_graph_buckets(monkeypatch):
+    class KeywordOrderModel(nn.Module):
+        _spikingjelly_npu_graph_safe = True
+
+        def forward(self, inputs, **kwargs):
+            order = tuple(kwargs)
+            offset = {("left", "right"): 1.0, ("right", "left"): 2.0}[order]
+            return inputs + offset
+
+    model = KeywordOrderModel().eval()
+    sample = torch.zeros(2, 3)
+    runner = GraphBucketRunner(
+        model,
+        [
+            GraphBucketSpec((sample,), {"left": 1, "right": 2}, name="left-right"),
+            GraphBucketSpec((sample,), {"right": 2, "left": 1}, name="right-left"),
+        ],
+    )
+    fake_npu = FakeNPU()
+    enable_fake_npu(monkeypatch, runner, fake_npu)
+
+    left_right = runner(sample, left=1, right=2)
+    assert_same(left_right, torch.ones_like(sample))
+    assert "left-right" in runner.last_route.reason
+
+    right_left = runner(sample, right=2, left=1)
+    assert_same(right_left, torch.full_like(sample, 2.0))
+    assert "right-left" in runner.last_route.reason
+    assert len(fake_npu.capture_calls) == 2
+    assert set(runner._captures) == {0, 1}
+
+
+def test_keyword_static_values_remain_exact(monkeypatch):
     model = RecurrentMaskModel().eval()
     sample = torch.zeros(2, 3)
     state = (torch.zeros(2, 3), torch.zeros(2, 3))
@@ -156,7 +231,7 @@ def test_keyword_order_is_canonical_but_static_values_are_exact(monkeypatch):
     fake_npu = FakeNPU()
     enable_fake_npu(monkeypatch, runner, fake_npu)
 
-    runner(sample, state, scale=3.0, mask=mask)
+    runner(sample, state, mask=mask, scale=3.0)
     assert runner.last_route.backend == "npugraph"
 
     eager = runner(sample, state, mask=mask, scale=4.0)
@@ -191,9 +266,10 @@ def test_unknown_bucket_strict_raises_before_capture_or_eager(monkeypatch):
     fake_npu = FakeNPU()
     enable_fake_npu(monkeypatch, runner, fake_npu)
 
-    with pytest.raises(RuntimeError, match="allowlist"):
+    with pytest.raises(GraphPreExecutionError, match="allowlist") as captured:
         runner(torch.randn(3, 3))
 
+    assert captured.value.route is runner.last_route
     assert model.calls == 0
     assert fake_npu.capture_calls == []
 
@@ -561,9 +637,10 @@ def test_strict_known_fallbacks_raise_before_capture_or_eager(
     if case == "nondeterministic":
         monkeypatch.setattr(runner, "_deterministic_algorithms_enabled", lambda: False)
 
-    with pytest.raises(RuntimeError, match=reason):
+    with pytest.raises(GraphPreExecutionError, match=reason) as captured:
         runner(torch.zeros(2, 3))
 
+    assert captured.value.route is runner.last_route
     assert model.calls == 0
     assert fake_npu.capture_calls == []
 
@@ -579,11 +656,12 @@ def test_strict_hooks_raise_before_capture_or_eager(monkeypatch):
     enable_fake_npu(monkeypatch, runner, fake_npu)
     handle = model.linear.register_forward_hook(lambda module, args, output: output)
     try:
-        with pytest.raises(RuntimeError, match="hooks"):
+        with pytest.raises(GraphPreExecutionError, match="hooks") as captured:
             runner(torch.zeros(2, 3))
     finally:
         handle.remove()
 
+    assert captured.value.route is runner.last_route
     assert model.calls == 0
     assert fake_npu.capture_calls == []
 
@@ -838,6 +916,7 @@ def test_dropout_training_rejected_unless_explicitly_unsafe(monkeypatch):
 def test_graph_bucket_public_exports():
     assert ExportedGraphBucketRunner is GraphBucketRunner
     assert ExportedGraphBucketSpec is GraphBucketSpec
+    assert ExportedGraphPreExecutionError is GraphPreExecutionError
 
 
 def test_static_graph_runner_facade_compatibility(monkeypatch):

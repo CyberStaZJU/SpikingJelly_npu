@@ -134,13 +134,13 @@ The opt-in process-local `spikingjelly` alias registers these modules canonicall
 
 `GraphBucketRunner` admits a finite explicit allowlist of exact tensor PyTree signatures. The signature covers:
 
-- positional/keyword tree structure and immutable static values;
+- positional/keyword tree structure, caller keyword insertion order, and immutable static values;
 - tensor shape, dtype, device, layout, `requires_grad`;
 - stride, storage offset, contiguous memory-format classification;
 - alias/storage groups;
 - train/eval state, deterministic-training policy, module structure, parameter and buffer identity/version.
 
-The default maximum is eight declared buckets. Unknown signatures use observable eager fallback or strict pre-execution failure. Capture failure is isolated to that bucket. Failure to restore buffers, gradients, runtime memories, training state, RNG, or module structure poisons the runner. Replay failure after launch also poisons the runner and never triggers eager replay.
+The default maximum is eight declared buckets. Unknown signatures use observable eager fallback or strict pre-execution failure. `StaticGraphRunner(strict=True)` applies the same pre-execution rule to every known rejection before capture/replay: it raises `GraphPreExecutionError` carrying the rejected `GraphRoute` and never calls the eager model. Non-strict mode keeps the compatibility fallback. An exception from the capture attempt itself propagates unchanged; subsequent strict calls report a structured prior-capture rejection. Capture failure is isolated to that bucket in `GraphBucketRunner`. Failure to restore buffers, gradients, runtime memories, training state, RNG, or module structure poisons the runner. Replay failure after launch also poisons the runner and never triggers eager replay.
 
 CPU tests use a static-buffer replay test double to check changed-input copying, nested PyTree reconstruction, aliases, and poisoning. This does not replace a physical CANN/torch-npu graph canary. No arbitrary dynamic-shape graph claim is made.
 

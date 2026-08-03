@@ -114,10 +114,10 @@ General restrictions remain:
 - no higher-order differentiation;
 - autocast caching must be disabled;
 - train and eval states need separate captures;
-- partial batches and diagnostics should remain eager;
+- partial batches and diagnostics remain eager only in non-strict compatibility mode; strict mode rejects them before model execution;
 - hard spike thresholds can amplify small nondeterministic kernel differences.
 
-`StaticGraphRunner` enforces the full-batch/ordinary-forward routing policy and records a fallback reason. Models must declare graph-safe per-forward state or callers must explicitly set `assume_graph_safe=True`; do not opt in models whose persistent neuron memory can be consumed by capture warmups. Training capture is disabled by default and requires both `allow_training=True` and, by default, `torch.use_deterministic_algorithms(True, warn_only=False)`. Warn-only mode is not qualified. The deterministic requirement is tracked as capture state, so changing it invalidates and rebuilds a graph. The expert-only `require_deterministic_training=False` override must not be used for formal SNN training without independent parity evidence.
+`StaticGraphRunner` enforces the full-batch/ordinary-forward routing policy and records a fallback reason. With `strict=False`, known pre-capture rejections use observable eager fallback. With `strict=True`, every such rejection raises `GraphPreExecutionError` carrying the rejected route before any eager model call; capture-attempt exceptions still propagate unchanged, and no failure after graph launch is eager-replayed. Models must declare graph-safe per-forward state or callers must explicitly set `assume_graph_safe=True`; do not opt in models whose persistent neuron memory can be consumed by capture warmups. Training capture is disabled by default and requires both `allow_training=True` and, by default, `torch.use_deterministic_algorithms(True, warn_only=False)`. Warn-only mode is not qualified. The deterministic requirement is tracked as capture state, so changing it invalidates and rebuilds a graph. The expert-only `require_deterministic_training=False` override must not be used for formal SNN training without independent parity evidence.
 
 ## AMP
 

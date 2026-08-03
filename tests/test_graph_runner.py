@@ -1,9 +1,14 @@
 import warnings
 
+import pytest
 import torch
 from torch import nn
 
-from spikingjelly_npu.npu.graph import StaticGraphRunner, _CaptureStateError
+from spikingjelly_npu.npu.graph import (
+    GraphPreExecutionError,
+    StaticGraphRunner,
+    _CaptureStateError,
+)
 
 
 class DiagnosticModel(nn.Module):
@@ -46,6 +51,83 @@ def test_partial_batch_and_kwargs_stay_eager():
     runner(torch.randn(4, 3), scale=2.0)
     assert "tensor-only" in runner.last_route.reason
     assert model.calls[-1] == (4, 2.0)
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("arguments", "tensor-only"),
+        ("partial", "batch shape"),
+        ("cpu", "model is not on an NPU"),
+        ("graph_unsafe", "graph-safe"),
+        ("training_disabled", "allow_training=True"),
+        ("nondeterministic", "use_deterministic_algorithms"),
+        ("rng_sensitive", "RNG-sensitive"),
+        ("hooks", "hooks"),
+        ("signature", "input signature"),
+        ("prior_capture_failure", "prior capture failed"),
+    ],
+)
+def test_strict_known_pre_execution_rejections_never_run_eager(
+    monkeypatch, case, reason
+):
+    model = DiagnosticModel().eval()
+    if case in {"training_disabled", "nondeterministic", "rng_sensitive"}:
+        model.train()
+    if case == "rng_sensitive":
+        model.dropout = nn.Dropout(p=0.5)
+
+        def forward(inputs, scale=1.0):
+            model.calls.append((inputs.shape[0], scale))
+            return model.dropout(model.linear(inputs)) * scale
+
+        model.forward = forward
+
+    runner = StaticGraphRunner(
+        model,
+        batch_size=4,
+        strict=True,
+        allow_training=case in {"nondeterministic", "rng_sensitive"},
+        require_deterministic_training=case == "nondeterministic",
+        assume_graph_safe=case != "graph_unsafe",
+    )
+    if case != "cpu":
+        monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    if case == "nondeterministic":
+        monkeypatch.setattr(runner, "_deterministic_algorithms_enabled", lambda: False)
+    if case == "hooks":
+        handle = model.linear.register_forward_hook(lambda module, args, output: output)
+    else:
+        handle = None
+    if case == "signature":
+        runner._graphed = lambda inputs: model(inputs)
+        runner._captured_training_state = runner._module_training_state()
+        runner._captured_deterministic_state = runner._deterministic_capture_state()
+        runner._captured_structure_signature = runner._module_structure_signature()
+        runner._capture_signature = runner._input_signature(torch.randn(4, 3))
+    if case == "prior_capture_failure":
+        runner._capture_error = "RuntimeError: unsupported op"
+
+    inputs = torch.randn(2 if case == "partial" else 4, 3)
+    if case == "signature":
+        inputs.requires_grad_(True)
+
+    def call():
+        if case == "arguments":
+            return runner(inputs, scale=2.0)
+        return runner(inputs)
+
+    try:
+        with pytest.raises(GraphPreExecutionError, match=reason) as captured:
+            call()
+    finally:
+        if handle is not None:
+            handle.remove()
+
+    assert captured.value.route is runner.last_route
+    assert captured.value.route.backend == "eager"
+    assert not captured.value.route.captured
+    assert model.calls == []
 
 
 def test_parameterless_module_uses_input_device_for_routing(monkeypatch):
@@ -729,3 +811,33 @@ def test_capture_failure_falls_back_once(monkeypatch):
     assert len(seen) == 1
     assert "unsupported op" in runner.capture_error
     assert "prior capture failed" in runner.last_route.reason
+
+
+def test_strict_capture_failure_propagates_original_and_then_structured_rejection(
+    monkeypatch,
+):
+    model = DiagnosticModel().eval()
+    runner = StaticGraphRunner(
+        model,
+        batch_size=4,
+        strict=True,
+        assume_graph_safe=True,
+    )
+    monkeypatch.setattr(runner, "_execution_device_type", lambda inputs: "npu")
+    capture_error = RuntimeError("unsupported op")
+    monkeypatch.setattr(
+        runner,
+        "_capture",
+        lambda sample: (_ for _ in ()).throw(capture_error),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported op") as first:
+        runner(torch.randn(4, 3))
+    assert first.value is capture_error
+    assert model.calls == []
+    assert "unsupported op" in runner.capture_error
+
+    with pytest.raises(GraphPreExecutionError, match="prior capture failed") as second:
+        runner(torch.randn(4, 3))
+    assert second.value.route is runner.last_route
+    assert model.calls == []

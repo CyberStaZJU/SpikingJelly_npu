@@ -1,4 +1,5 @@
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -219,6 +220,62 @@ def test_aspy_route_helper_keeps_historical_display_name_api():
     assert route.backend == "aspy"
     assert route.reason == "Ascend C fused multi-step IF kernel"
     assert route.accelerated
+
+
+def test_aspy_route_exact_serialization_is_additive_and_script_compatible():
+    route = _aspy.native_route("if", strict=True, training=True)
+
+    expected = {
+        "requested_backend": "aspy",
+        "backend": "aspy",
+        "training": True,
+        "requested_provider": "aspy",
+        "actual_provider": "aspy",
+        "logical_operation": "activation_based.neuron.if.multi_step",
+        "reason_code": "aspy.if.native",
+        "reason": "Ascend C fused multi-step IF kernel",
+        "accelerated": True,
+        "strict": True,
+        "mode": "train",
+        "native_launch_attempted": True,
+        "abi_version": None,
+        "schema_version": None,
+        "bucket": None,
+        "native_region": "if",
+        "format_conversion": None,
+        "route_schema_version": _aspy.ASPY_ROUTE_SCHEMA_VERSION,
+    }
+    serialized = route.__dict__
+
+    assert serialized == expected
+    assert json.loads(json.dumps(serialized)) == expected
+    assert serialized.copy() == expected
+    assert route.to_dict() == {
+        key: value
+        for key, value in expected.items()
+        if key
+        not in {"requested_backend", "backend", "training", "route_schema_version"}
+    }
+
+    serialized["reason"] = "local mutation"
+    assert route.reason == "Ascend C fused multi-step IF kernel"
+
+
+def test_aspy_route_fallback_serialization_preserves_historical_values():
+    route = _aspy.eager_route(
+        "cupy",
+        "unsupported request",
+        logical_operation="activation_based.neuron.if.multi_step",
+        reason_code="aspy.if.unsupported_request",
+        training=False,
+    )
+
+    assert route.__dict__["requested_backend"] == "cupy"
+    assert route.__dict__["backend"] == "torch"
+    assert route.__dict__["training"] is False
+    assert route.__dict__["requested_provider"] == "cupy"
+    assert route.__dict__["actual_provider"] == "torch"
+    assert route.__dict__["mode"] == "eval"
 
 
 def test_aspy_commits_validated_extension_result(monkeypatch):

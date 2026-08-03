@@ -23,6 +23,16 @@ class GraphRoute:
     expected_batch_size: int | None
 
 
+class GraphPreExecutionError(RuntimeError):
+    """A strict graph request was rejected before capture or replay launched."""
+
+    def __init__(self, route: GraphRoute) -> None:
+        if route.backend != "eager" or route.captured:
+            raise ValueError("GraphPreExecutionError requires a pre-execution eager route")
+        self.route = route
+        super().__init__(route.reason)
+
+
 @dataclass(frozen=True)
 class _TensorSignature:
     shape: tuple[int, ...]
@@ -193,13 +203,12 @@ def _freeze_static_value(value: Any) -> tuple[Any, ...]:
     )
 
 
-def _canonical_call_tree(
+def _exact_call_tree(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     if any(not isinstance(key, str) for key in kwargs):
         raise TypeError("graph bucket keyword names must be strings")
-    ordered_kwargs = {key: kwargs[key] for key in sorted(kwargs)}
-    return tuple(args), ordered_kwargs
+    return tuple(args), dict(kwargs)
 
 
 def _tensor_memory_signature(
@@ -286,7 +295,7 @@ def _tensor_storage_groups(tensors: tuple[torch.Tensor, ...]) -> tuple[int, ...]
 def _describe_call(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> tuple[_CallSignature, tuple[torch.Tensor, ...], _CallTemplate]:
-    leaves, tree_spec = _pytree.tree_flatten(_canonical_call_tree(args, kwargs))
+    leaves, tree_spec = _pytree.tree_flatten(_exact_call_tree(args, kwargs))
     signatures: list[_TensorSignature | _StaticSignature] = []
     tensors: list[torch.Tensor] = []
     template_leaves: list[Any] = []
@@ -860,7 +869,7 @@ class GraphBucketRunner(_GraphRunnerSafety):
     ) -> None:
         self.last_route = GraphRoute("eager", reason, False, expected_batch_size)
         if self.strict:
-            raise RuntimeError(reason)
+            raise GraphPreExecutionError(self.last_route)
 
     def _unknown_signature(self, detail: str | None = None) -> None:
         reason = "call signature is not in the exact graph bucket allowlist"
@@ -961,7 +970,7 @@ class GraphBucketRunner(_GraphRunnerSafety):
             )
             self.last_route = GraphRoute("eager", reason, False, expected_batch_size)
             if self.strict:
-                raise RuntimeError(reason) from state.capture_exception
+                raise GraphPreExecutionError(self.last_route) from state.capture_exception
             return self.model(*args, **kwargs)
 
         if state.graphed is None:
@@ -1015,12 +1024,15 @@ class GraphBucketRunner(_GraphRunnerSafety):
 
 
 class StaticGraphRunner(_GraphRunnerSafety):
-    """Capture one fixed full-batch path and leave all other calls eager.
+    """Capture one fixed full-batch path with observable pre-execution routing.
 
     This source-compatible facade preserves the original tensor-only call policy.
-    Its first qualified full-batch call binds the one exact input signature; partial
-    batches and diagnostic arguments remain eager. Training capture is disabled by
-    default and deterministic algorithms are required by default when it is enabled.
+    Its first qualified full-batch call binds the one exact input signature. In
+    non-strict mode, partial batches, diagnostic arguments, and other known
+    pre-capture rejections remain eager. In strict mode, every such rejection raises
+    :class:`GraphPreExecutionError` before eager execution. Training capture is
+    disabled by default and deterministic algorithms are required by default when
+    it is enabled.
     """
 
     def __init__(
@@ -1093,47 +1105,36 @@ class StaticGraphRunner(_GraphRunnerSafety):
         self._capture_signature = self._input_signature(sample)
         return graphed
 
+    def _route_fallback_or_raise(self, reason: str) -> None:
+        self.last_route = GraphRoute("eager", reason, False, self.batch_size)
+        if self.strict:
+            raise GraphPreExecutionError(self.last_route)
+
     def __call__(self, inputs: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
         if self._capture_state_error is not None:
             raise self._capture_state_error
         if args or kwargs:
-            self.last_route = GraphRoute(
-                "eager",
-                "graph supports tensor-only ordinary forward",
-                False,
-                self.batch_size,
-            )
+            self._route_fallback_or_raise("graph supports tensor-only ordinary forward")
             return self.model(inputs, *args, **kwargs)
         if int(inputs.shape[0]) != self.batch_size:
-            self.last_route = GraphRoute(
-                "eager",
-                "batch shape does not match static capture bucket",
-                False,
-                self.batch_size,
+            self._route_fallback_or_raise(
+                "batch shape does not match static capture bucket"
             )
             return self.model(inputs)
         if self._execution_device_type(inputs) != "npu":
-            self.last_route = GraphRoute(
-                "eager", "model is not on an NPU", False, self.batch_size
-            )
+            self._route_fallback_or_raise("model is not on an NPU")
             return self.model(inputs)
         if not self._declares_graph_safe():
-            self.last_route = GraphRoute(
-                "eager",
+            self._route_fallback_or_raise(
                 "model does not declare graph-safe per-forward state; "
-                "set assume_graph_safe=True only after qualification",
-                False,
-                self.batch_size,
+                "set assume_graph_safe=True only after qualification"
             )
             return self.model(inputs)
         training_capture = self._training_capture_requested()
         if training_capture and not self.allow_training:
-            self.last_route = GraphRoute(
-                "eager",
+            self._route_fallback_or_raise(
                 "training NPUGraph requires explicit allow_training=True "
-                "after parity qualification",
-                False,
-                self.batch_size,
+                "after parity qualification"
             )
             return self.model(inputs)
         if (
@@ -1141,55 +1142,41 @@ class StaticGraphRunner(_GraphRunnerSafety):
             and self.require_deterministic_training
             and not self._deterministic_algorithms_enabled()
         ):
-            self.last_route = GraphRoute(
-                "eager",
+            self._route_fallback_or_raise(
                 "training NPUGraph requires "
                 "torch.use_deterministic_algorithms(True, warn_only=False); "
                 "set require_deterministic_training=False only after independent parity "
-                "qualification",
-                False,
-                self.batch_size,
+                "qualification"
             )
             return self.model(inputs)
         rng_reason = self._rng_sensitive_training_reason() if training_capture else None
         if rng_reason is not None and not self.allow_unsafe_rng_training:
-            self.last_route = GraphRoute(
-                "eager",
+            self._route_fallback_or_raise(
                 f"RNG-sensitive training capture rejected: {rng_reason}; set "
                 "allow_unsafe_rng_training=True only for an independently qualified "
-                "unsafe path",
-                False,
-                self.batch_size,
-            )
-            return self.model(inputs)
-        if self._capture_error is not None:
-            self.last_route = GraphRoute(
-                "eager",
-                f"prior capture failed: {self._capture_error}",
-                False,
-                self.batch_size,
+                "unsafe path"
             )
             return self.model(inputs)
         if self._has_module_hooks():
-            self.last_route = GraphRoute(
-                "eager",
-                "module hooks are incompatible with NPUGraph",
-                False,
-                self.batch_size,
+            self._route_fallback_or_raise(
+                "module hooks are incompatible with NPUGraph"
             )
             return self.model(inputs)
-        if self._graphed is not None and (
+        execution_state_changed = self._graphed is not None and (
             self._captured_training_state != self._module_training_state()
             or self._captured_deterministic_state != self._deterministic_capture_state()
             or self._captured_structure_signature != self._module_structure_signature()
-        ):
+        )
+        if execution_state_changed:
             self.reset_capture()
+        elif self._capture_error is not None:
+            self._route_fallback_or_raise(
+                f"prior capture failed: {self._capture_error}"
+            )
+            return self.model(inputs)
         if self._graphed is not None and self._capture_signature != self._input_signature(inputs):
-            self.last_route = GraphRoute(
-                "eager",
-                "input signature does not match static capture",
-                False,
-                self.batch_size,
+            self._route_fallback_or_raise(
+                "input signature does not match static capture"
             )
             return self.model(inputs)
         if self._graphed is None:
@@ -1231,6 +1218,7 @@ class StaticGraphRunner(_GraphRunnerSafety):
 __all__ = [
     "GraphBucketRunner",
     "GraphBucketSpec",
+    "GraphPreExecutionError",
     "GraphRoute",
     "StaticGraphRunner",
 ]

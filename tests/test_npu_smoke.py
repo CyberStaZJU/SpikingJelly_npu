@@ -5,7 +5,12 @@ import torch
 
 from spikingjelly_npu.activation_based import functional, layer, neuron, surrogate
 from spikingjelly_npu.fedsnn import PackedBNTTMLP
-from spikingjelly_npu.npu import StaticGraphRunner, configure_npu, is_npu_available
+from spikingjelly_npu.npu import (
+    GraphPreExecutionError,
+    StaticGraphRunner,
+    configure_npu,
+    is_npu_available,
+)
 
 pytestmark = pytest.mark.npu
 
@@ -78,10 +83,9 @@ def test_training_npugraph_is_disabled_by_default():
     device = require_npu()
     model = PackedBNTTMLP(16, 32, 5, 4).to(device).train()
     runner = StaticGraphRunner(BatchFirst(model), batch_size=8, strict=True)
-    outputs = runner(torch.rand(8, 4, 16, device=device))
-    outputs.square().mean().backward()
+    with pytest.raises(GraphPreExecutionError, match="allow_training=True"):
+        runner(torch.rand(8, 4, 16, device=device))
     assert runner.last_route.backend == "eager"
-    assert "allow_training=True" in runner.last_route.reason
 
 
 def test_training_npugraph_requires_deterministic_algorithms():
@@ -96,20 +100,22 @@ def test_training_npugraph_requires_deterministic_algorithms():
             strict=True,
             allow_training=True,
         )
-        outputs = runner(torch.rand(8, 4, 16, device=device))
-        outputs.square().mean().backward()
+        with pytest.raises(
+            GraphPreExecutionError,
+            match="use_deterministic_algorithms\\(True, warn_only=False\\)",
+        ):
+            runner(torch.rand(8, 4, 16, device=device))
         assert runner.last_route.backend == "eager"
-        assert "use_deterministic_algorithms(True, warn_only=False)" in runner.last_route.reason
     finally:
         torch.use_deterministic_algorithms(previous_deterministic)
 
 
-def test_partial_batch_uses_eager_npu():
+def test_partial_batch_strict_rejects_before_eager_npu():
     device = require_npu()
     model = torch.nn.Linear(4, 2).to(device)
     runner = StaticGraphRunner(
         model, batch_size=8, strict=True, assume_graph_safe=True
     )
-    output = runner(torch.rand(3, 4, device=device))
-    assert output.shape == (3, 2)
+    with pytest.raises(GraphPreExecutionError, match="batch shape"):
+        runner(torch.rand(3, 4, device=device))
     assert runner.last_route.backend == "eager"

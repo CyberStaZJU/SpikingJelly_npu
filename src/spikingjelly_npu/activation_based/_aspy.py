@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, NoReturn
 
@@ -30,20 +30,30 @@ from spikingjelly_npu.routing import (
 
 from . import surrogate
 
+ASPY_ROUTE_SCHEMA_VERSION = 2
+
 
 class AsPyRoute(ProviderRoute):
     """Backward-compatible name for an observable provider route.
 
-    The inherited ``requested_backend`` and ``backend`` properties preserve the
-    old API. ``__dict__`` remains a read-only serialization view for existing
-    qualification scripts even though the shared contract uses slots.
+    ``ASPY_ROUTE_SCHEMA_VERSION == 2`` defines the additive ``__dict__`` payload.
+    The inherited ``requested_backend``, ``backend``, and ``training`` properties
+    preserve the old API. ``__dict__`` is an additive serialization view: it keeps
+    those historical keys while retaining every immutable :class:`ProviderRoute`
+    field and identifying this compatibility schema explicitly.
     """
 
     __slots__ = ()
 
     @property
     def __dict__(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "requested_backend": self.requested_backend,
+            "backend": self.backend,
+            "training": self.training,
+            **self.to_dict(),
+            "route_schema_version": ASPY_ROUTE_SCHEMA_VERSION,
+        }
 
 
 @dataclass(frozen=True)
@@ -1016,4 +1026,9 @@ def try_fedsnn_decay_lif(
     )
 
 
-__all__ = ["AsPyBackendError", "AsPyIFResult", "AsPyRoute"]
+__all__ = [
+    "ASPY_ROUTE_SCHEMA_VERSION",
+    "AsPyBackendError",
+    "AsPyIFResult",
+    "AsPyRoute",
+]
