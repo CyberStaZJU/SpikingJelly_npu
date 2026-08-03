@@ -24,6 +24,29 @@ python -m benchmarks.benchmark_sequence_recurrent \
 
 Omit the smoke overrides for the frozen five-process/five-second protocol and use the reference shapes from the acceptance policy. Store every generated JSON outside the checkout. A CPU smoke validates orchestration and schema only; it does not qualify an NPU route or support a performance claim.
 
+## Sequence physical adaptation result
+
+On Ascend 910B4/CANN 8.5.0/Python 3.10.20/torch and torch-npu 2.9.0 in FP32, small-shape eager physical adaptation passed:
+
+- standard RNN/GRU/LSTM FP32 primitive fallback: 18/18 train/eval × full/remainder/singleton cases;
+- project-defined spiking RNN/GRU/LSTM: 18/18 cases with the same mode/batch coverage;
+- standard cross-attention, Transformer encoder, and Transformer decoder: 18/18 cases with the same mode/batch coverage.
+
+These are device availability/parity checks only. The candidate routes were eager PyTorch operations dispatched by torch-npu, not distinct optimized implementations, so no latency or memory claim follows from them.
+
+Tiny Spikformer forward/state checks passed only under the narrow continuous-state addendum (`rtol=2e-4, atol=5e-4` for BaseNode final state alone). Public output and loss remained inside the original tight gate, but input-gradient maximum absolute difference was `8.2284e-4` and 7/29 parameter gradients failed, worst `1.3299e-2`. Consequently there is no Spikformer training or performance qualification. Detailed sanitized identities and hashes are in [`sequence_physical_qualification_20260803.json`](evidence/sequence_physical_qualification_20260803.json).
+
+## Compact IF/LIF five-process negative result
+
+The compact ABI was compared with the full-output native ABI at `[T,B,F]=[8,64,4096]`. Each IF and LIF hotspot used five fresh processes, alternating candidate/baseline first position, at least five seconds of synchronized work per implementation, and synchronization before and after every timed call. All workers reported zero maximum absolute difference for loss, final voltage, input gradient, and initial-voltage gradient.
+
+| Hotspot | Full median | Compact median | Speedup | Peak allocated-HBM reduction | Gate |
+|---|---:|---:|---:|---:|---|
+| IF | 2.8254 ms | 2.7386 ms | 1.0317× | 10.0% | Fail |
+| LIF | 2.8312 ms | 2.8052 ms | 1.0093× | 10.0% | Fail |
+
+The frozen hotspot gate required either at least `1.25×` speedup, or at least `20%` allocated-memory reduction with no more than `5%` latency regression. Neither hotspot passed. This is a correctness result and a negative performance result; compact routing is not promoted as an optimized public route.
+
 ## Optimization hierarchy
 
 1. Pack stateless ANN operators across `[T*N, ...]`.

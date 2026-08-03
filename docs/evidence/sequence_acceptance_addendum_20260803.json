@@ -1,0 +1,57 @@
+{
+  "accepted_tolerance": {
+    "atol": 0.0005,
+    "rtol": 0.0002
+  },
+  "claim_boundary": "This addendum accepts only continuous BaseNode final-state drift for tiny-shape FP32 eager NPU parity. It does not relax public outputs/logits, loss, gradients, optimizer updates, discrete spike equality where separately required, representative-shape qualification, native acceleration, or family-wide claims.",
+  "decision_date": "2026-08-03",
+  "decision_source": "user",
+  "observed_trigger": {
+    "batch_kind": "full",
+    "case": "spiking-self-attention",
+    "failed_evidence_sha256": "4121e507da4029f39184526b4781d086c8aadc294d2cb385b7f8ea938253f917",
+    "maximum_absolute_difference": 0.00036078691482543945,
+    "mode": "train",
+    "original_atol": 0.00002,
+    "original_rtol": 0.0002
+  },
+  "schema_version": 1,
+  "scope": {
+    "cann": "8.5.0",
+    "comparison": "continuous_base_node_final_state",
+    "device": "Ascend 910B4",
+    "dtype": "float32",
+    "evidence_level": "tiny_shape_eager_parity",
+    "family": "spiking-models",
+    "models": [
+      "spiking-self-attention",
+      "spikformer"
+    ]
+  },
+  "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
+  "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
+  "status": "accepted_for_physical_sequence_qualification",
+  "unchanged_gates": {
+    "finite_values": true,
+    "full_remainder_singleton": true,
+    "input_initial_state_and_parameter_gradients": {
+      "atol": 0.00002,
+      "rtol": 0.0002
+    },
+    "loss": {
+      "atol": 0.00002,
+      "rtol": 0.0002
+    },
+    "optimizer_updates_and_state_dict": {
+      "atol": 0.00002,
+      "rtol": 0.0002
+    },
+    "public_output_and_spikformer_logits": {
+      "atol": 0.00002,
+      "rtol": 0.0002
+    },
+    "strict_route_and_no_post_launch_replay": true,
+    "train_and_eval": true,
+    "two_optimizer_updates_per_training_case": true
+  }
+}

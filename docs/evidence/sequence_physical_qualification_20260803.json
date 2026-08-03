@@ -1,0 +1,154 @@
+{
+  "claim_boundary": "These are small- or tiny-shape FP32 adaptation and component results on the stated stack. They do not establish representative-shape or family-wide acceleration. Standard recurrent, spiking recurrent, and Transformer results are eager compatibility/parity evidence. Spikformer training is not qualified.",
+  "date": "2026-08-03",
+  "evidence": {
+    "compact_if_lif": {
+      "claim": "Physical correctness passed, but neither compact hotspot met the frozen performance gate; compact routing must not be promoted as a performance optimization.",
+      "evidence_sha256": "3e7f2c9c476cf3d46d5e946a5df398189ce06d1aec0b6536cecc11b1e336883a",
+      "if": {
+        "allocated_hbm_reduction_fraction": 0.10000366201997021,
+        "compact_median_ms": 2.73860152810812,
+        "full_median_ms": 2.8254217468202114,
+        "full_over_compact_speedup": 1.0317023918306467,
+        "memory_alternative_gate_pass": false,
+        "paired_worker_gate_pass": true,
+        "speed_gate_pass": false
+      },
+      "lif": {
+        "allocated_hbm_reduction_fraction": 0.10000366201997021,
+        "compact_median_ms": 2.8051724657416344,
+        "full_median_ms": 2.831154502928257,
+        "full_over_compact_speedup": 1.009262188868574,
+        "memory_alternative_gate_pass": false,
+        "paired_worker_gate_pass": true,
+        "speed_gate_pass": false
+      },
+      "protocol": {
+        "alternating_first_position": true,
+        "fresh_processes_per_hotspot": 5,
+        "shape": [
+          8,
+          64,
+          4096
+        ],
+        "synchronization": "before and after every timed call"
+      },
+      "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
+      "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
+      "status": "correctness_pass_performance_fail",
+      "worker_correctness": "All five IF and all five LIF workers reported zero maximum absolute difference for loss, final voltage, input gradient, and initial-voltage gradient."
+    },
+    "graph_canary": {
+      "checks": {
+        "fail": 0,
+        "pass": 11,
+        "qualified_rejection": 0
+      },
+      "claim": "Tiny fixed-shape evaluation canary only; every newly claimed model and bucket still requires separate physical qualification.",
+      "evidence_sha256": "175751d6f51717e1b3c5e9a577f4ded99a7a6cebe787473d751e8c49192d72d8",
+      "source_commit": "08b78263b1d5ec32986a448959d513870fdc8fff",
+      "source_tree": "16f67ce45d37ebe441b18c957220c8ffaf89b3f4",
+      "status": "pass"
+    },
+    "spikformer": {
+      "accepted_continuous_final_state_tolerance": {
+        "atol": 0.0005,
+        "rtol": 0.0002
+      },
+      "claim": "Tiny-shape eager public output/logit, loss, persistent-buffer, initial-node-state-gradient, and continuous final-state checks passed. End-to-end input gradients and all parameter gradients did not pass, so training, optimizer trajectories, convergence, native execution, and acceleration are unqualified.",
+      "diagnostic_evidence_sha256": {
+        "cpu_authority_batch_norm": "47c061875648864596488a16883b14fbf94e154d36a2490a45ce08ba05130c23",
+        "deterministic_algorithms": "b9b9d73c866a350b0f6d1d7104986ad305194c1186ea0367446f82347005e903",
+        "explicit_npu_batch_norm": "fd804d00cb40a08557acfa7798590849928686db525e14fb66c27c395dba5dd8",
+        "hf32_disable_inconclusive": "043445f7bcbebcd521447ed5550620a6072bb6c5e3036fc7df614613eecd9b29",
+        "localization": "6ace6c97f82bdaafa31b5fe1127d0891222c7b4c4aa62fda3a86a0899271e352"
+      },
+      "localization": {
+        "continuous_final_state_max_abs": 0.00035059452056884766,
+        "input_gradient_max_abs": 0.0008228407823480666,
+        "input_gradient_mismatches": 32,
+        "loss_max_abs": 0.000016450881958007812,
+        "output_max_abs": 1.4901161193847656e-08,
+        "parameter_gradient_failed_count": 7,
+        "parameter_gradient_total_count": 29,
+        "worst_parameter_gradient_max_abs": 0.013298913836479187,
+        "worst_parameter_gradient_name": "patch_embed.stages.0.conv_bn.block.0.weight"
+      },
+      "interpretation": "Small Conv2d FP32 drift is amplified by training BatchNorm and MaxPool sensitivity. LIF spike outputs were exact and local LIF VJP checks passed. Explicit NPU BatchNorm arithmetic, a diagnostic CPU-authority BatchNorm autograd path, and strict deterministic algorithms did not repair the end-to-end gradients. Disabling Conv HF32 produced no verdict because CANN initialization failed before model execution due a missing tbe Python module.",
+      "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
+      "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
+      "status": "forward_boundary_pass_training_fail",
+      "unchanged_tight_tolerance": {
+        "atol": 0.00002,
+        "rtol": 0.0002
+      }
+    },
+    "spiking_recurrent": {
+      "case_count": 18,
+      "case_pass_count": 18,
+      "cases": "RNN, GRU, and LSTM across train/eval and full/remainder/singleton batches",
+      "claim": "Small-shape eager torch-npu compatibility/parity only; no custom native or speed claim.",
+      "evidence_sha256": "5b824d256953fff583a12f56a1a12204e648c054ec6661270b491ab6e6505c8d",
+      "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
+      "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
+      "status": "pass",
+      "worst_max_abs": {
+        "final_state": 0.0,
+        "initial_state_gradient": 1.4551915228366852e-11,
+        "input_gradient": 1.7462298274040222e-10,
+        "optimizer_update": 4.656612873077393e-10,
+        "output": 0.0,
+        "parameter_gradient": 2.9802322387695312e-08
+      }
+    },
+    "standard_recurrent": {
+      "case_count": 18,
+      "case_pass_count": 18,
+      "cases": "RNN, GRU, and LSTM across train/eval and full/remainder/singleton batches",
+      "claim": "FP32 NPU availability and CPU-authority parity only; no recurrent speedup, fused vendor, native, graph, or representative-shape claim.",
+      "evidence_sha256": "72abb1bc820dfd1bcfa6179b0ebcb465123449530c589165a69aa235665ed250",
+      "source_identity": {
+        "base_commit": "08b78263b1d5ec32986a448959d513870fdc8fff",
+        "base_tree": "16f67ce45d37ebe441b18c957220c8ffaf89b3f4",
+        "dirty": true,
+        "source_archive_sha256": "6932063afc84f21a7115c5d0a072f5b57e51780f9bb6dfbad0aa2a13378e2fca",
+        "uncommitted_patch_sha256": "c1450bd4cf0262f8aa3c0e11b99d743e4024cd2277cafb8f5a0bfa32d4ad97ce"
+      },
+      "status": "pass",
+      "worst_max_abs": {
+        "final_state": 1.1920928955078125e-07,
+        "initial_state_gradient": 1.1175870895385742e-08,
+        "input_gradient": 9.313225746154785e-09,
+        "optimizer_update": 0.0,
+        "output": 1.1920928955078125e-07,
+        "parameter_gradient": 5.960464477539063e-08
+      }
+    },
+    "transformer": {
+      "case_count": 18,
+      "case_pass_count": 18,
+      "cases": "Cross-attention, encoder, and decoder across train/eval and full/remainder/singleton batches",
+      "claim": "Small-shape eager torch-npu compatibility/parity only; no custom native, graph, representative-shape, or speed claim.",
+      "evidence_sha256": "f5f1316f8907f4eb47a067a66b3b00c3083734b9fe77f3daead4a59e44847f4d",
+      "source_commit": "fc29e5c26d4073d7dc8122b3d35e2d0b1d3b190b",
+      "source_tree": "f9c01373ff7c75637446559265a7e2651e2f2c1f",
+      "status": "pass",
+      "worst_max_abs": {
+        "input_gradient": 0.0,
+        "optimizer_update": 1.4901161193847656e-08,
+        "output": 5.960464477539062e-07,
+        "parameter_gradient": 1.1920928955078125e-07
+      }
+    }
+  },
+  "qualified_target": {
+    "autograd": "first_order",
+    "cann": "8.5.0",
+    "device": "Ascend 910B4",
+    "dtype": "float32",
+    "python": "3.10.20",
+    "torch": "2.9.0",
+    "torch_npu": "2.9.0"
+  },
+  "schema_version": 1
+}
