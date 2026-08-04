@@ -1,0 +1,165 @@
+{
+  "bf16_vs_fp32_training_performance": {
+    "all_runs_finite": true,
+    "median_of_process_medians_seconds": {
+      "bf16": 0.4622022211551666,
+      "bf16_latency_reduction_percent": 7.47224095575878,
+      "bf16_speedup": 1.080756748384947,
+      "fp32": 0.499528169631958
+    },
+    "median_process_p90_seconds": {
+      "bf16": 0.46558743342757225,
+      "bf16_speedup": 1.0808045916082292,
+      "fp32": 0.5032090358436108
+    },
+    "peak_allocated_bytes": {
+      "bf16": 27587724800,
+      "bf16_reduction_percent": 15.707877740846865,
+      "fp32": 32728710656
+    },
+    "peak_reserved_bytes": {
+      "bf16": 32935772160,
+      "bf16_reduction_percent": 18.803639747699307,
+      "fp32": 40563113984
+    },
+    "protocol": "five alternating fresh-process pairs; three warmups and ten synchronized measured optimizer steps per process",
+    "shape_dependence": "At batch 8 the same BF16 policy was 26.3% slower than FP32 while reducing allocated HBM by 14.9%; performance claims are therefore restricted to the frozen batch-64 shape."
+  },
+  "claim_boundary": "Qualified on the stated stack: BF16 mixed eager training feasibility and three-seed 20-step stability at T=4, B=64, 224x224, D=384, six heads, four blocks; a bounded 200-update fixed-batch optimization canary; and exact fixed-shape evaluation NPUGraph replay at B=8 and B=64. Only the frozen B=64 eager training benchmark showed a BF16 latency and HBM benefit. This does not establish dataset convergence, generalization, arbitrary Spikformer variants, training NPUGraph, a custom native Spikformer operator, FP8, or universal architecture-family acceleration.",
+  "frozen_representative_shape": {
+    "T": 4,
+    "classes": 1000,
+    "depths": 4,
+    "embed_dims": 384,
+    "input": [
+      64,
+      3,
+      224,
+      224
+    ],
+    "mlp_ratio": 4.0,
+    "model": "Spikformer",
+    "num_heads": 6
+  },
+  "native_spikformer_operator_decision": {
+    "best_future_candidate": "BF16-public/FP32-state multi-step LIF scan implementing the model's exact Sigmoid surrogate",
+    "conditions": [
+      "representative stage profile proves LIF decomposition is launch-bound",
+      "producer physical formats and conversion cost are measured",
+      "isolated hotspot and containing-block performance gates pass",
+      "first-order backward, exact spike semantics, and FP32 state are preserved"
+    ],
+    "decision": "Do not add a custom native Spikformer operator from current evidence.",
+    "public_operator_added": false,
+    "rejected_without_new_evidence": [
+      "replace exact softmax-free (V @ K^T) @ Q order with standard fused attention",
+      "custom Conv/BatchNorm/LIF mixed-training fusion",
+      "claim native Spikformer execution from eager torch-npu Conv/MatMul kernels"
+    ]
+  },
+  "npugraph": {
+    "evaluation": {
+      "batch64": {
+        "capture_and_changed_input_replay": "passed",
+        "claim": "Correct fixed-shape evaluation graph capability only; not an acceleration claim.",
+        "eager_median_seconds": 0.20396648347377777,
+        "graph_median_seconds": 0.21424981951713562,
+        "max_abs_vs_eager": 0.0,
+        "performance_gate": "failed; graph replay was about 5.0% slower than eager",
+        "strict_batch63_rejected_pre_execution": true
+      },
+      "batch8": {
+        "boundary": "Useful secondary bucket, not the frozen representative batch.",
+        "capture_and_changed_input_replay": "passed",
+        "five_process_median_speedup": 2.421134562780348,
+        "max_abs_vs_eager": 0.0,
+        "strict_unknown_batch_rejected_pre_execution": true
+      }
+    },
+    "training": {
+      "batch8_probe": "capture failed after launch with a second-backward saved-tensor error",
+      "claim": "Spikformer training NPUGraph remains unsupported.",
+      "failure_semantics": "runner poisoned; no eager replay after launch",
+      "qualified": false
+    }
+  },
+  "qualification_date": "2026-08-04",
+  "representative_training": {
+    "single_step": {
+      "finite": true,
+      "loss": 6.9587202072143555,
+      "peak_allocated_bytes": 27545340416,
+      "peak_reserved_bytes": 32931577856,
+      "seconds_including_first_step_compilation": 1.860814418643713
+    },
+    "three_seed_twenty_step": {
+      "all_losses_and_gradients_finite": true,
+      "interpretation": "Numerical and optimizer-state stability on random batches; not a dataset convergence or accuracy result.",
+      "parameter_gradient_optimizer_dtypes": [
+        "float32"
+      ],
+      "peak_allocated_bytes": 27586919424,
+      "peak_reserved_bytes": 32935772160,
+      "public_logits_dtype": "float32",
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "steady_step_medians_seconds": [
+        0.4581703543663025,
+        0.45775115489959717,
+        0.45786696672439575
+      ]
+    },
+    "two_hundred_update_canary": {
+      "all_losses_and_gradients_finite": true,
+      "final_training_accuracy": 1.0,
+      "first20_mean_loss": 2.1057857513427733,
+      "fixed_batch": true,
+      "interpretation": "Optimization-health canary only; memorization of one fixed synthetic batch is not generalization evidence.",
+      "last20_mean_loss": 0.0008432995877228677,
+      "last_over_first": 0.0004004678952667099,
+      "same_architecture_except_classes": 10,
+      "seed": 17,
+      "shape": [
+        8,
+        3,
+        224,
+        224
+      ],
+      "updates": 200
+    }
+  },
+  "schema_version": 1,
+  "source": {
+    "base_commit": "15f9657ee3ff0df373de88065486fb61167f9367",
+    "branch": "grok/sequence-semantic-alpha-20260803",
+    "matrix_junit_sha256": "645f86235d2e582efc1160d999c3d002cfdc13bd4cbed29b82a97c9d492ecca7",
+    "matrix_result_sha256": "71f2702a336f90c618f8f740a9d8fda56a8a3e612c4b8a532a81853513534ef5",
+    "note": "Unreleased isolated-worktree evidence. This file does not authorize merge, push, release, or FedSNN dependency adoption.",
+    "post_measurement_difference": "The final reviewed tree differs from the measured snapshot only in Ruff import ordering for spikformer.py, amp.py, transformer.py, and test_runtime.py, plus making test_bf16_models_npu.py select ASCEND_DEVICE_ID/DEVICE_ID instead of hard-coding npu:7. Runtime semantics used by the measurements are unchanged.",
+    "raw_result_sha256": {
+      "frozen_rep_b64_3seed_20step": "cef581208af750931d00e8c0a23f5caa8d46e4239e06611e0806760a859569cf",
+      "frozen_rep_b64_bf16_vs_fp32_5fresh": "ce20740e9064c70f81b1b3fb5f1325acd14ed200a7e4b8dd9bbfd1867402de84",
+      "frozen_rep_b64_npugraph_eval": "c7d89cb1590d10828b84cdc49e68450ec585adeada4bd6d3704373f6660ff323",
+      "rep_b8_200update_canary": "95a2b29fe1eb8794986d5b5cae279bc11cceeb026ea31cea5f520ab0832d7858",
+      "rep_b8_npugraph_eval_5fresh": "da0af1a38df158fbfad026238b61a3151b1fa2a58d308d36648d39ffb4d4bade",
+      "rep_b8_npugraph_train_failure": "970a921f6ce5baf4bf26074ee9ce04d6d3cdc22e2282dba0f5b117da745e94f5"
+    },
+    "snapshot_identity": "20260803T235546Z",
+    "snapshot_python_file_count": 49,
+    "snapshot_source_tests_py_sha256": "a2c434cd386fb50589b5c3715493b0721775b41cd71444962f88852eea3aca9f",
+    "staging_root": "/home/cyb/FedSNN_state/staging/spikingjelly_npu_bf16_primary_20260803T235546Z"
+  },
+  "stack": {
+    "allow_internal_format": false,
+    "cann": "8.5.0",
+    "device": "Ascend 910B4 NPU7",
+    "precision_profile": "ascend910b4_bf16_mixed_fp32_state_v1",
+    "python": "3.10.20",
+    "torch": "2.9.0",
+    "torch_npu": "2.9.0"
+  },
+  "status": "representative_bf16_eager_training_and_fixed_eval_graph_qualified_with_boundaries"
+}

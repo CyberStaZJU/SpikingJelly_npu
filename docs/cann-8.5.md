@@ -95,15 +95,15 @@ device = configure_npu(
     "npu:7",
     jit_compile=False,
     allow_internal_format=False,
-    allow_conv_hf32=False,  # required by the qualified tiny Spikformer parity path
+    require_bf16=True,
 )
 ```
 
 `jit_compile=False` selects binary ACLNN/opapi operators in torch-npu 2.9, while `allow_internal_format=False` prevents legacy internal-format ACLop kernels such as Conv2D from being selected during NPUGraph capture. In the qualified 2.9 runtime the latter is a write-only property, so it must be assigned directly rather than tested with `hasattr`.
 
-`allow_conv_hf32` controls torch-npu's process-global Conv HF32 policy only when explicitly supplied. Its default is `None`, which preserves the process's existing setting. The helper applies an explicit Conv policy after device selection, reads it back, and raises if the setting is unavailable or was not retained. Package import and model construction do not mutate this policy.
+`require_bf16=True` fails closed before process-global NPU configuration if the runtime cannot report BF16 support. The active mixed-precision profile uses BF16 for qualified Conv/Linear/MatMul and public activations. Normalization, membrane dynamics, surrogate math, reductions, final logits, master parameters, gradients, and optimizer state remain FP32. LayerNorm and Softmax are conservative FP32 targets; standard Transformer internals remain delegated to torch-npu until an explicit isolated route is physically qualified. FP8 is not enabled by this profile.
 
-Tiny-shape SpikingSelfAttention/Spikformer FP32 train/eval parity was qualified with `allow_conv_hf32=False`: all 12 train/eval × full/remainder/singleton cases passed, including two SGD updates per training case. The same localized Spikformer training path failed tight input- and parameter-gradient gates under the default Conv HF32 policy. This does not establish representative-shape, convergence, native Spikformer, graph, or performance qualification, and callers should not assume that changing Conv HF32 is universally preferable for unrelated models.
+The physical tiny-shape BF16 family matrix passed 84 train/eval × full/remainder/singleton cases across standard recurrent and Transformer APIs, project spiking recurrent modules, SpikingSelfAttention, and Spikformer. Representative shapes, long trajectories, convergence, native Spikformer, graph capture, latency, memory, and FP8 remain separate qualification gates.
 
 ## NPUGraph constraints
 
@@ -126,16 +126,23 @@ General restrictions remain:
 
 ## AMP
 
-Use:
+Use the explicit BF16 profile only after a fail-closed capability check:
 
 ```python
-from spikingjelly_npu.npu import autocast
+import torch
+from spikingjelly_npu.npu import configure_npu, npu_bf16_autocast
 
-with autocast(dtype=torch.float16, cache_enabled=False):
-    output = model(inputs)
+device = configure_npu("npu:7", require_bf16=True)
+model = model.to(device)
+with npu_bf16_autocast():
+    output = model(inputs.to(device))
 ```
 
-This package provides the context helper but does not silently create or control a GradScaler. The AsPy native ABI and recurrence remain FP32. BF16 public IF/LIF/KLIF/PLIF and FedSNN decay-LIF tensors may use the explicit `bf16-public-fp32-aspy-island` route: inputs are materialized as bridge-safe FP32 tensors before extension loading, FP32 voltage state and PLIF/KLIF master scalars are preserved, and public spike outputs are cast back to BF16. Configure AsPy before dtype conversion and create or recreate the optimizer only after backend/dtype setup; a late backend switch with a non-FP32 learnable scalar is rejected before extension loading. Route metadata reports the conversion kind and estimated conversion bytes. This is BF16 mixed-precision interoperability, **not** a BF16-native AsPy kernel. For broader training, keep FP32 master parameters/gradients/optimizer state, use `torch.autocast(device_type="npu", dtype=torch.bfloat16, cache_enabled=False)`, and separately validate spike decisions, state, gradients, optimizer updates, convergence, latency, and HBM before formal use. The frozen gates are recorded in [`docs/evidence/bf16_mixed_acceptance_policy_20260804.json`](evidence/bf16_mixed_acceptance_policy_20260804.json).
+`npu_bf16_autocast()` fixes `dtype=torch.bfloat16` and `cache_enabled=False`, records package-local context state without eagerly importing `torch_npu`, and restores nested/exception state transactionally. Generic `autocast(...)` remains available but does not activate the qualified model policy. The package does not silently create or control a GradScaler.
+
+The model contract keeps FP32 master parameters, gradients, optimizer state, spiking recurrent state/gates, neuron membrane/threshold/surrogate/reset, BatchNorm/BNTT, average reductions, and final logits. Qualified Conv/Linear/MatMul operations may execute in BF16. Standard FP32-storage recurrent modules retain the eager compatibility decomposition so affine operators may autocast to BF16 while gates/state remain FP32; this avoids the unavailable FP32 `DynamicGRUV2` route. Standard Transformer wrappers delegate BF16 operator selection and internal normalization/reduction behavior to upstream torch-npu. Physical per-family qualification is mandatory before a support claim.
+
+The AsPy native ABI and recurrence remain FP32. BF16 public IF/LIF/KLIF/PLIF and FedSNN decay-LIF tensors may use the explicit `bf16-public-fp32-aspy-island` route: inputs are materialized as bridge-safe FP32 tensors before extension loading, FP32 voltage state and PLIF/KLIF master scalars are preserved, and public spike outputs are cast back to BF16. Configure AsPy before dtype conversion and create or recreate the optimizer only after backend/dtype setup; a late backend switch with a non-FP32 learnable scalar is rejected before extension loading. Route metadata reports the conversion kind and estimated conversion bytes. This is BF16 mixed-precision interoperability, **not** a BF16-native AsPy kernel. Separately validate spike decisions, state, gradients, optimizer updates, convergence, latency, and HBM before formal use. The frozen gates are recorded in [`docs/evidence/bf16_mixed_acceptance_policy_20260804.json`](evidence/bf16_mixed_acceptance_policy_20260804.json).
 
 ## Safety
 

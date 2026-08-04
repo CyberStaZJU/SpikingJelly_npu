@@ -34,7 +34,26 @@ On Ascend 910B4/CANN 8.5.0/Python 3.10.20/torch and torch-npu 2.9.0 in FP32, sma
 
 These are device availability/parity checks only. The candidate routes were eager PyTorch operations dispatched by torch-npu, not distinct optimized implementations, so no latency or memory claim follows from them.
 
-Under the runtime's default Conv HF32 policy, the localized tiny Spikformer training case kept public output and loss inside the original tight gate but failed input-gradient and parameter-gradient checks: maximum input-gradient difference was `8.2284e-4`, and 7/29 parameter gradients failed, worst `1.3299e-2`. A first HF32-off attempt was invalid because replacing `PYTHONPATH` removed the CANN `tbe` module before model execution. With CANN paths preserved, explicit Conv HF32-off repaired the localized case and a clean-source rerun through `configure_npu(allow_conv_hf32=False)` passed all 12 SpikingSelfAttention/Spikformer train/eval × full/remainder/singleton cases, including two SGD updates per training case. The worst observed differences were `2.3693e-6` for parameter gradients, `8.9407e-7` for continuous node final state, `3.3528e-8` for input gradient, and `2.9802e-8` for public output. This is tiny-shape eager parity only: no representative-shape, convergence, native, graph, latency, memory, or family-wide acceleration claim follows. Detailed sanitized identities and hashes are in [`sequence_physical_qualification_20260803.json`](evidence/sequence_physical_qualification_20260803.json).
+Historical FP32 Conv-policy diagnostics are retained only as superseded investigation evidence. The active optimization direction is BF16 mixed precision with FP32 stability/master state. The 84-case tiny-shape matrix remains the broad family-compatibility gate; the following larger result is intentionally Spikformer-shape-specific.
+
+## Representative Spikformer BF16 result
+
+The frozen training shape is Spikformer `T=4`, batch `64`, input `224x224`, embedding `384`, six heads, and four blocks. Three seeds completed twenty optimizer steps with finite losses and FP32 parameters, gradients, and SGD momentum. Five alternating fresh-process BF16/FP32 pairs used three warmups and ten synchronized measured optimizer steps per process:
+
+| Metric | BF16 | FP32 | BF16 result |
+|---|---:|---:|---:|
+| Median of process medians | 462.20 ms | 499.53 ms | `1.0808x`, `7.47%` lower latency |
+| Median process p90 | 465.59 ms | 503.21 ms | `1.0808x` |
+| Peak allocated HBM | 25.70 GiB | 30.48 GiB | `15.7%` lower |
+| Peak reserved HBM | 30.68 GiB | 37.78 GiB | `18.8%` lower |
+
+At batch `8`, BF16 was `26.3%` slower than FP32 despite using less HBM. The latency claim is therefore restricted to the frozen batch-64 shape; it is not a universal BF16 speed claim.
+
+A fixed-synthetic-batch, ten-class canary with the same architecture at batch `8` completed 200 updates, reduced first-20 mean loss `2.1058` to last-20 mean `8.433e-4`, and reached 100% training accuracy. This only checks optimization health and cannot support dataset convergence or generalization claims.
+
+Fixed-shape BF16 evaluation NPUGraph replay was exact against eager for changed inputs at batches `8` and `64`, and strict mismatched batches were rejected before execution. Five fresh batch-8 processes measured `2.421x` median replay speedup. At the frozen batch-64 shape, however, graph replay was about `5%` slower than eager, so that bucket is qualified for correctness only. Training capture failed after launch with a saved-tensor second-backward error; the runner poisoned itself and did not execute eager fallback. Spikformer training NPUGraph is not qualified.
+
+Native-hotspot review did not justify a new public custom Spikformer operator. A mixed BF16-public/FP32-state Sigmoid-LIF scan is the first future candidate only if stage profiling proves launch-bound recurrence and the isolated, block, and model gates pass. The exact evidence is in `docs/evidence/spikformer_bf16_representative_qualification_20260804.json`.
 
 ## Compact IF/LIF five-process negative result
 

@@ -14,6 +14,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from ..npu.amp import is_npu_bf16_autocast_active
 from . import base, surrogate
 
 
@@ -69,7 +70,10 @@ def _prepare_cell_state(
         (input.shape[0], hidden_size) if is_batched else (hidden_size,)
     )
     if value is None:
-        return input.new_zeros(input.shape[0], hidden_size)
+        dtype = torch.float32 if is_npu_bf16_autocast_active() else input.dtype
+        return torch.zeros(
+            input.shape[0], hidden_size, dtype=dtype, device=input.device
+        )
     if not isinstance(value, Tensor):
         raise TypeError(f"{cell_name}: {state_name} must be a torch.Tensor")
     if tuple(value.shape) != expected_shape:
@@ -77,11 +81,24 @@ def _prepare_cell_state(
             f"{cell_name}: {state_name} has shape {tuple(value.shape)}; "
             f"expected {expected_shape}"
         )
-    if value.device != input.device or value.dtype != input.dtype:
+    expected_dtype = torch.float32 if is_npu_bf16_autocast_active() else input.dtype
+    if value.device != input.device or value.dtype != expected_dtype:
         raise RuntimeError(
-            f"{cell_name}: {state_name} must have the same device and dtype as input"
+            f"{cell_name}: {state_name} must have device={input.device} and "
+            f"dtype={expected_dtype}"
         )
     return value if is_batched else value.unsqueeze(0)
+
+
+def _fp32_recurrence_value(value: Tensor) -> Tensor:
+    return value.float() if is_npu_bf16_autocast_active() else value
+
+
+def _fp32_surrogate_forward(module: nn.Module, value: Tensor) -> Tensor:
+    if not is_npu_bf16_autocast_active():
+        return module(value)
+    with torch.autocast(device_type="npu", enabled=False):
+        return module(value.float()).float()
 
 
 def _rnn_cell_forward(
@@ -93,8 +110,11 @@ def _rnn_cell_forward(
     bias_hh: Tensor | None,
     surrogate_function: nn.Module,
 ) -> Tensor:
-    return surrogate_function(
-        F.linear(input, weight_ih, bias_ih) + F.linear(hidden, weight_hh, bias_hh)
+    affine = F.linear(input, weight_ih, bias_ih) + F.linear(
+        hidden, weight_hh, bias_hh
+    )
+    return _fp32_surrogate_forward(
+        surrogate_function, _fp32_recurrence_value(affine)
     )
 
 
@@ -108,13 +128,15 @@ def _gru_cell_forward(
     surrogate_function1: nn.Module,
     surrogate_function2: nn.Module,
 ) -> Tensor:
-    input_r, input_z, input_n = F.linear(input, weight_ih, bias_ih).chunk(3, dim=-1)
-    hidden_r, hidden_z, hidden_n = F.linear(
-        hidden, weight_hh, bias_hh
-    ).chunk(3, dim=-1)
-    reset = surrogate_function1(input_r + hidden_r)
-    update = surrogate_function1(input_z + hidden_z)
-    candidate = surrogate_function2(input_n + reset * hidden_n)
+    input_affine = _fp32_recurrence_value(F.linear(input, weight_ih, bias_ih))
+    hidden_affine = _fp32_recurrence_value(F.linear(hidden, weight_hh, bias_hh))
+    input_r, input_z, input_n = input_affine.chunk(3, dim=-1)
+    hidden_r, hidden_z, hidden_n = hidden_affine.chunk(3, dim=-1)
+    reset = _fp32_surrogate_forward(surrogate_function1, input_r + hidden_r)
+    update = _fp32_surrogate_forward(surrogate_function1, input_z + hidden_z)
+    candidate = _fp32_surrogate_forward(
+        surrogate_function2, input_n + reset * hidden_n
+    )
     return (1.0 - update) * candidate + update * hidden
 
 
@@ -129,14 +151,15 @@ def _lstm_cell_forward(
     surrogate_function2: nn.Module,
 ) -> tuple[Tensor, Tensor]:
     hidden, cell = state
-    gates = F.linear(input, weight_ih, bias_ih) + F.linear(
-        hidden, weight_hh, bias_hh
+    gates = _fp32_recurrence_value(
+        F.linear(input, weight_ih, bias_ih)
+        + F.linear(hidden, weight_hh, bias_hh)
     )
     input_gate, forget_gate, candidate, output_gate = gates.chunk(4, dim=-1)
-    input_gate = surrogate_function1(input_gate)
-    forget_gate = surrogate_function1(forget_gate)
-    candidate = surrogate_function2(candidate)
-    output_gate = surrogate_function1(output_gate)
+    input_gate = _fp32_surrogate_forward(surrogate_function1, input_gate)
+    forget_gate = _fp32_surrogate_forward(surrogate_function1, forget_gate)
+    candidate = _fp32_surrogate_forward(surrogate_function2, candidate)
+    output_gate = _fp32_surrogate_forward(surrogate_function1, output_gate)
     cell = torch.clamp_max(forget_gate * cell + input_gate * candidate, 1.0)
     return output_gate * cell, cell
 
@@ -487,9 +510,10 @@ class _SpikingRecurrentBase(base.MemoryModule):
 
     def _zero_state(self, input: Tensor) -> Tensor | tuple[Tensor, Tensor]:
         shape = self._expected_state_shape(input.shape[1])
-        hidden = input.new_zeros(shape)
+        dtype = torch.float32 if is_npu_bf16_autocast_active() else input.dtype
+        hidden = torch.zeros(shape, dtype=dtype, device=input.device)
         if self._is_lstm:
-            return hidden, input.new_zeros(shape)
+            return hidden, torch.zeros(shape, dtype=dtype, device=input.device)
         return hidden
 
     def _validate_state_tensor(
@@ -508,8 +532,11 @@ class _SpikingRecurrentBase(base.MemoryModule):
             problems.append(f"shape {tuple(value.shape)} instead of {expected_shape}")
         if value.device != input.device:
             problems.append(f"device {value.device} instead of {input.device}")
-        if value.dtype != input.dtype:
-            problems.append(f"dtype {value.dtype} instead of {input.dtype}")
+        expected_dtype = (
+            torch.float32 if is_npu_bf16_autocast_active() else input.dtype
+        )
+        if value.dtype != expected_dtype:
+            problems.append(f"dtype {value.dtype} instead of {expected_dtype}")
         if problems:
             detail = ", ".join(problems)
             if persistent:

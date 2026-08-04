@@ -4,7 +4,16 @@ import pytest
 import torch
 
 from spikingjelly_npu.activation_based import _aspy, surrogate
-from spikingjelly_npu.fedsnn import DecayLIF, MultiStepLIF, PackedBNTTConvNet, PoissonEncoder
+from spikingjelly_npu.fedsnn import (
+    BNTT1d,
+    BNTT2d,
+    DecayLIF,
+    MultiStepLIF,
+    PackedBNTTConvNet,
+    PackedBNTTMLP,
+    PoissonEncoder,
+)
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 from spikingjelly_npu.routing import ProviderRoute
 
 
@@ -26,6 +35,82 @@ def test_multistep_lif_matches_manual_soft_reset():
     currents = torch.tensor([[[0.8]], [[0.8]], [[0.0]]])
     spikes = module(currents)
     torch.testing.assert_close(spikes, torch.tensor([[[0.0]], [[1.0]], [[0.0]]]))
+
+
+@pytest.mark.parametrize(
+    ("module", "input_shape"),
+    [
+        (BNTT1d(2, 3).eval(), (2, 4, 3)),
+        (BNTT2d(2, 3).eval(), (2, 4, 3, 5, 5)),
+    ],
+)
+def test_bntt_bf16_profile_normalizes_in_fp32_and_restores_public_dtype(
+    monkeypatch, module, input_shape
+):
+    original_autocast = torch.autocast
+    disabled_calls = []
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                disabled_calls.append(kwargs)
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    current = torch.randn(*input_shape, dtype=torch.bfloat16)
+
+    with npu_bf16_autocast():
+        output = module(current)
+
+    assert output.dtype == torch.bfloat16
+    assert all(layer.running_mean.dtype == torch.float32 for layer in module.layers)
+    assert len(disabled_calls) == 1
+
+
+def test_packed_bntt_mlp_bf16_profile_has_bf16_spikes_and_fp32_logits(monkeypatch):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    model = PackedBNTTMLP(4, 6, 3, 2).train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    current = torch.randn(2, 4, 4, requires_grad=True)
+
+    with npu_bf16_autocast():
+        logits, spikes = model(current, return_spikes=True)
+        loss = logits.square().mean()
+    loss.backward()
+    optimizer.step()
+
+    assert logits.dtype == torch.float32
+    assert spikes.dtype == torch.bfloat16
+    assert all(parameter.dtype == torch.float32 for parameter in model.parameters())
+    assert all(parameter.grad is not None for parameter in model.parameters())
+    assert all(parameter.grad.dtype == torch.float32 for parameter in model.parameters())
 
 
 def test_decay_lif_exact_order_forward_gradient_and_state_dict_neutrality():
@@ -407,6 +492,58 @@ def test_packed_convnet_matches_stepwise_reference_in_eval_and_gradients():
         packed.named_parameters(), stepwise.named_parameters(), strict=True
     ):
         torch.testing.assert_close(parameter_a.grad, parameter_b.grad, rtol=2e-5, atol=2e-6)
+
+
+def test_packed_convnet_bf16_profile_matches_stepwise_fp32_islands(monkeypatch):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if kwargs.get("enabled", True):
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+            else:
+                self.context = original_autocast(device_type="cpu", enabled=False)
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    torch.manual_seed(13)
+    packed = PackedBNTTConvNet(
+        input_channels=1,
+        classes=3,
+        time_steps=2,
+        channels=(2, 2),
+        hidden_features=4,
+        pooled_size=2,
+    ).eval()
+    stepwise = PackedBNTTConvNet(
+        input_channels=1,
+        classes=3,
+        time_steps=2,
+        channels=(2, 2),
+        hidden_features=4,
+        pooled_size=2,
+    ).eval()
+    stepwise.load_state_dict(packed.state_dict())
+    input_seq_a = torch.rand(2, 2, 1, 8, 8, requires_grad=True)
+    input_seq_b = input_seq_a.detach().clone().requires_grad_(True)
+
+    with npu_bf16_autocast():
+        output_a = packed.forward_current_seq(input_seq_a)
+        output_b = stepwise.forward_current_seq_stepwise(input_seq_b)
+
+    assert output_a.dtype == torch.float32
+    assert output_b.dtype == torch.float32
+    torch.testing.assert_close(output_a, output_b, rtol=2e-2, atol=2e-2)
+    output_a.sum().backward()
+    output_b.sum().backward()
+    torch.testing.assert_close(input_seq_a.grad, input_seq_b.grad, rtol=4e-2, atol=4e-2)
 
 
 def test_packed_convnet_input_forward_and_backward():

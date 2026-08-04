@@ -14,6 +14,7 @@ from spikingjelly_npu.activation_based.recurrent import (
     SpikingRNN,
     SpikingRNNCell,
 )
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 
 
 class ShiftedSigmoid(nn.Module):
@@ -33,6 +34,16 @@ class ParameterizedSurrogate(nn.Module):
 
     def forward(self, x):
         return torch.sigmoid(x * self.scale + self.offset)
+
+
+class InspectSurrogate(nn.Module):
+    def __init__(self, dtypes) -> None:
+        super().__init__()
+        self.dtypes = dtypes
+
+    def forward(self, x):
+        self.dtypes.append(x.dtype)
+        return torch.sigmoid(x)
 
 
 CELL_CASES = [
@@ -196,6 +207,41 @@ def test_default_surrogates_are_fresh_per_cell(cell_type, kwargs):
         assert isinstance(first.surrogate_function1, surrogate.ATan)
         assert first.surrogate_function1 is not second.surrogate_function1
         assert first.surrogate_function2 is first.surrogate_function1
+
+
+def test_custom_spiking_recurrent_surrogate_runs_in_fp32_bf16_profile(monkeypatch):
+    original_autocast = torch.autocast
+    dtypes = []
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if kwargs.get("enabled", True):
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+            else:
+                self.context = original_autocast(device_type="cpu", enabled=False)
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    cell = SpikingGRUCell(
+        2,
+        3,
+        surrogate_function1=InspectSurrogate(dtypes),
+        surrogate_function2=InspectSurrogate(dtypes),
+    )
+    x = torch.randn(4, 2)
+
+    with npu_bf16_autocast():
+        output = cell(x)
+
+    assert output.dtype == torch.float32
+    assert dtypes == [torch.float32, torch.float32, torch.float32]
 
 
 def test_spiking_rnn_cell_equation_forward_and_gradient():
@@ -362,6 +408,43 @@ def test_sequence_matches_explicit_cell_loop_forward_and_gradients(module_type, 
         module.parameters(), reference_parameters, strict=True
     ):
         torch.testing.assert_close(actual_parameter.grad, expected_parameter.grad)
+
+
+@pytest.mark.parametrize(("module_type", "kwargs"), SEQUENCE_CASES)
+def test_spiking_recurrent_bf16_profile_keeps_state_output_and_grads_fp32(
+    monkeypatch, module_type, kwargs
+):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **_kwargs):
+            self.context = original_autocast(
+                device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+            )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    module = module_type(3, 4, num_layers=2, **kwargs)
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.01)
+    input = torch.randn(5, 2, 3, requires_grad=True)
+
+    with npu_bf16_autocast():
+        output, state = module(input)
+        loss = output.square().mean() + sum(
+            value.square().mean() for value in _state_tensors(state)
+        )
+    loss.backward()
+    optimizer.step()
+
+    assert output.dtype == torch.float32
+    assert all(value.dtype == torch.float32 for value in _state_tensors(state))
+    assert all(parameter.dtype == torch.float32 for parameter in module.parameters())
+    assert all(parameter.grad.dtype == torch.float32 for parameter in module.parameters())
 
 
 @pytest.mark.parametrize(("module_type", "kwargs"), SEQUENCE_CASES)

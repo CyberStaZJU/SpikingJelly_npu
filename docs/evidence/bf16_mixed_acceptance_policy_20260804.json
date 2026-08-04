@@ -1,79 +1,18 @@
 {
-  "schema_version": 1,
-  "decision_date": "2026-08-04",
-  "decision_source": "user",
-  "status": "component_qualified_physical_aspy_fp32_island",
-  "identity": "ascend910b4_bf16_mixed_fp32_state_v1",
-  "qualified_target": {
-    "device": "Ascend 910B4",
-    "cann": "8.5.0",
-    "python": "3.10.20",
-    "torch": "2.9.0",
-    "torch_npu": "2.9.0",
-    "autocast": {
-      "device_type": "npu",
-      "dtype": "torch.bfloat16",
-      "cache_enabled": false
-    },
-    "conv_hf32": false,
-    "autograd": "first_order"
-  },
-  "precision_contract": {
-    "master_parameters_gradients_and_optimizer_state": "float32; configure AsPy before dtype conversion and create or recreate the optimizer after backend/dtype setup",
-    "qualified_conv_linear_matmul_hotspots": "bfloat16",
-    "normalization_membrane_threshold_surrogate_and_reductions": "float32_allowed_or_required",
-    "aspy": {
-      "public_activation_and_spike_dtype": "bfloat16",
-      "native_abi_dtype": "float32",
-      "state_dtype": "float32",
-      "plif_klif_scalar_parameter_dtype": "float32",
-      "conversion_route": "bf16-public-fp32-aspy-island",
-      "conversion_bytes_semantics": "estimated forward boundary traffic only; backward cast and framework traffic require measurement",
-      "claim": "BF16 mixed precision through an FP32 AsPy native island; not a BF16-native AsPy kernel"
-    }
-  },
-  "scope": {
-    "sequence_layout": "dense_fixed_length",
-    "graph_shapes": "finite_explicit_exact_shape_buckets_only",
-    "training_and_inference": true,
-    "full_remainder_singleton_batches": true,
-    "unsupported": [
-      "true_acl_bf16_aspy_native_io",
-      "fp16_aspy",
-      "higher_order_aspy_gradients",
-      "ragged_or_arbitrary_dynamic_shapes",
-      "silent_post_launch_eager_replay",
-      "bf16_family_wide_claims_from_one_primitive"
-    ]
-  },
-  "same_mode_bf16_correctness_gates": {
-    "finite_outputs_losses_gradients_and_updates": true,
-    "discrete_spikes": "exact",
-    "public_bf16_output": "exact_after_reference_fp32_island_output_is_cast_to_bfloat16",
-    "aspy_fp32_state": {
-      "rtol": 0.00005,
-      "atol": 0.00003
-    },
-    "input_and_master_parameter_gradients_after_bf16_cast_boundary": {
-      "rtol": 0.005,
-      "atol": 0.005
-    },
-    "strict_route_has_no_fallback": true,
-    "physical_format_validation_before_extension_loading": true,
-    "no_eager_replay_after_native_launch": true
-  },
   "bf16_vs_fp32_interpretation": {
     "equivalence_claim": false,
+    "optimization_health_canary": "at least 200 optimizer updates on a bounded fixed batch; this is not dataset convergence or generalization evidence",
     "purpose": "quality, convergence, latency, and memory comparison",
-    "training_trajectory": "three seeds times twenty optimizer steps before a native training claim",
-    "convergence_canary": "three paired seeds and at least 200 optimizer updates"
+    "training_trajectory": "three seeds times twenty optimizer steps before any representative BF16 training-stability claim"
   },
+  "claim_boundary": "The physical tiny-shape eager matrix qualifies the listed standard recurrent, Transformer layer/stack/top-level, spiking recurrent, SpikingSelfAttention, and Spikformer routes for train/eval and full/remainder/singleton batches on the stated stack. The separate Spikformer representative record qualifies only its explicit eager-training and fixed-evaluation-graph buckets, including shape-specific BF16 latency/HBM evidence and bounded trajectory/canary evidence. AsPy remains BF16 public tensors routed through the unchanged FP32 native ABI. No native BF16 kernel arithmetic, dataset generalization, training Spikformer NPUGraph, custom native Spikformer operator, arbitrary architecture variant, FP8, or family-wide acceleration is qualified.",
+  "decision_date": "2026-08-04",
+  "decision_source": "user",
+  "identity": "ascend910b4_bf16_mixed_fp32_state_v1",
   "measurement_protocol": {
-    "fresh_processes": 5,
     "balanced_interleaved_order": true,
-    "same_input_and_state_hash": true,
-    "warmup_required": true,
     "device_synchronization": "before_and_after_each_measured_region",
+    "fresh_processes": 5,
     "report": [
       "raw_process_medians",
       "median_of_five",
@@ -85,7 +24,114 @@
       "dtype_conversion_kind",
       "dtype_conversion_bytes",
       "source_and_native_bundle_identity"
+    ],
+    "same_input_and_state_hash": true,
+    "warmup_required": true
+  },
+  "precision_contract": {
+    "aspy": {
+      "claim": "BF16 mixed precision through an FP32 AsPy native island; not a BF16-native AsPy kernel",
+      "conversion_bytes_semantics": "estimated forward boundary traffic only; backward cast and framework traffic require measurement",
+      "conversion_route": "bf16-public-fp32-aspy-island",
+      "native_abi_dtype": "float32",
+      "plif_klif_scalar_parameter_dtype": "float32",
+      "public_activation_and_spike_dtype": "bfloat16",
+      "state_dtype": "float32"
+    },
+    "fp8": "not enabled; requires a separate hardware/runtime/operator/autograd qualification",
+    "layer_norm": "float32 conservative target; implementation and physical qualification required",
+    "master_parameters_gradients_and_optimizer_state": "float32; configure AsPy before dtype conversion and create or recreate the optimizer after backend/dtype setup",
+    "model_families": {
+      "fedsnn": "BF16 Conv/Linear public path with FP32 BNTT, membrane, threshold, surrogate, reset, average reductions, and final logits",
+      "spikformer": "same spiking boundaries plus FP32 spatial reductions and final logits",
+      "spiking_recurrent": "BF16 affine hotspots with FP32 gates, surrogate math, recurrent state, output state, parameters, gradients, and optimizer state",
+      "spiking_self_attention": "BF16 Conv/MatMul public path with FP32 BatchNorm, membrane, threshold, surrogate, reset, parameters, gradients, and optimizer state; public spikes BF16",
+      "standard_rnn_gru_lstm": "for FP32 NPU storage, retain the eager compatibility decomposition so affine operators may autocast to BF16 while gates and recurrent state remain FP32; non-FP32 storage delegates upstream",
+      "standard_transformer": "delegate attention, LayerNorm, softmax, and reduction policy to upstream torch-npu; physical qualification required"
+    },
+    "normalization_membrane_threshold_surrogate_and_reductions": "float32 required",
+    "public_activations": "bfloat16 where qualified",
+    "qualified_conv_linear_matmul_hotspots": "bfloat16",
+    "runtime_profile": {
+      "api": "npu_bf16_autocast",
+      "capability_gate": "configure_npu(..., require_bf16=true)",
+      "context_state": "package-managed ContextVar; safe to query without importing torch_npu",
+      "generic_autocast_does_not_activate_model_policy": true
+    },
+    "softmax": "float32 target; current standard Transformer route remains delegated to torch-npu until explicit isolation is qualified"
+  },
+  "qualified_target": {
+    "autocast": {
+      "cache_enabled": false,
+      "device_type": "npu",
+      "dtype": "torch.bfloat16"
+    },
+    "autograd": "first_order",
+    "cann": "8.5.0",
+    "conv_hf32_policy": "not managed by spikingjelly_npu; BF16 qualification does not depend on a package Conv HF32 setting",
+    "device": "Ascend 910B4",
+    "python": "3.10.20",
+    "torch": "2.9.0",
+    "torch_npu": "2.9.0"
+  },
+  "same_mode_bf16_correctness_gates": {
+    "aspy_fp32_state": {
+      "atol": 3e-05,
+      "rtol": 5e-05
+    },
+    "discrete_spikes": "exact",
+    "finite_outputs_losses_gradients_and_updates": true,
+    "input_and_master_parameter_gradients_after_bf16_cast_boundary": {
+      "atol": 0.005,
+      "rtol": 0.005
+    },
+    "no_eager_replay_after_native_launch": true,
+    "physical_format_validation_before_extension_loading": true,
+    "public_bf16_output": "exact_after_reference_fp32_island_output_is_cast_to_bfloat16",
+    "strict_route_has_no_fallback": true
+  },
+  "schema_version": 1,
+  "scope": {
+    "full_remainder_singleton_batches": true,
+    "graph_shapes": "finite_explicit_exact_shape_buckets_only",
+    "physical_model_matrix": {
+      "batches": [
+        "full",
+        "remainder",
+        "singleton"
+      ],
+      "boundary": "broad family support remains tiny-shape eager; separate Spikformer representative evidence is recorded in spikformer_bf16_representative_qualification_20260804.json",
+      "cases": 84,
+      "evidence_root": "/home/cyb/FedSNN_state/staging/spikingjelly_npu_bf16_primary_20260803T235546Z",
+      "families": [
+        "standard_rnn_gru_lstm",
+        "standard_multihead_attention",
+        "transformer_encoder_decoder_layers",
+        "transformer_encoder_decoder_stacks",
+        "top_level_transformer",
+        "spiking_rnn_gru_lstm",
+        "spiking_self_attention",
+        "spikformer"
+      ],
+      "modes": [
+        "train",
+        "eval"
+      ],
+      "result": "84 passed, 1 warning",
+      "status": "qualified_tiny_shape_eager"
+    },
+    "sequence_layout": "dense_fixed_length",
+    "training_and_inference": true,
+    "unsupported": [
+      "representative_shape_family_wide_bf16_claim_beyond_the_explicit_spikformer_bucket",
+      "standard_transformer_internal_fp32_island_claim_without_torch_npu_evidence",
+      "true_acl_bf16_aspy_native_io",
+      "fp16_aspy",
+      "higher_order_aspy_gradients",
+      "ragged_or_arbitrary_dynamic_shapes",
+      "silent_post_launch_eager_replay",
+      "bf16_family_wide_claims_from_one_primitive"
     ]
   },
-  "claim_boundary": "Passing AsPy cases qualifies BF16 public tensors routed through the unchanged FP32 AsPy ABI on the stated stack and shapes. It does not qualify native BF16 kernel arithmetic, all models, convergence, NPUGraph, or a performance improvement until those gates are separately completed."
+  "status": "component_and_shape_specific_representative_qualified"
 }

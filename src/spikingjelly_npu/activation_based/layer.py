@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from ..npu.amp import is_npu_bf16_autocast_active
 from . import base, functional, neuron
 
 
@@ -60,6 +62,19 @@ class Conv3d(nn.Conv3d, _StepAwareMixin):
         return self._forward_step_aware(x, super().forward)
 
 
+def _fp32_island_forward(single_step, x: Tensor) -> Tensor:
+    """Run a numerically sensitive operation in FP32 and restore public BF16."""
+
+    if not is_npu_bf16_autocast_active():
+        return single_step(x)
+    public_dtype = x.dtype
+    with torch.autocast(device_type="npu", enabled=False):
+        output = single_step(x.float())
+    if public_dtype == torch.bfloat16 and output.is_floating_point():
+        return output.to(dtype=public_dtype)
+    return output
+
+
 class BatchNorm1d(nn.BatchNorm1d, _StepAwareMixin):
     def __init__(self, num_features: int, eps: float = 1e-5, momentum: float = 0.1,
                  affine: bool = True, track_running_stats: bool = True, step_mode: str = "s"):
@@ -67,7 +82,10 @@ class BatchNorm1d(nn.BatchNorm1d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class BatchNorm2d(nn.BatchNorm2d, _StepAwareMixin):
@@ -77,7 +95,10 @@ class BatchNorm2d(nn.BatchNorm2d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class BatchNorm3d(nn.BatchNorm3d, _StepAwareMixin):
@@ -87,7 +108,10 @@ class BatchNorm3d(nn.BatchNorm3d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class MaxPool1d(nn.MaxPool1d, _StepAwareMixin):
@@ -123,7 +147,10 @@ class AvgPool1d(nn.AvgPool1d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class AvgPool2d(nn.AvgPool2d, _StepAwareMixin):
@@ -132,7 +159,10 @@ class AvgPool2d(nn.AvgPool2d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class AvgPool3d(nn.AvgPool3d, _StepAwareMixin):
@@ -141,7 +171,10 @@ class AvgPool3d(nn.AvgPool3d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class AdaptiveAvgPool1d(nn.AdaptiveAvgPool1d, _StepAwareMixin):
@@ -150,7 +183,10 @@ class AdaptiveAvgPool1d(nn.AdaptiveAvgPool1d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d, _StepAwareMixin):
@@ -159,7 +195,10 @@ class AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class AdaptiveAvgPool3d(nn.AdaptiveAvgPool3d, _StepAwareMixin):
@@ -168,7 +207,10 @@ class AdaptiveAvgPool3d(nn.AdaptiveAvgPool3d, _StepAwareMixin):
         self._set_step_mode(step_mode)
 
     def forward(self, x: Tensor):
-        return self._forward_step_aware(x, super().forward)
+        single_step = super().forward
+        return self._forward_step_aware(
+            x, lambda value: _fp32_island_forward(single_step, value)
+        )
 
 
 class Flatten(nn.Flatten, _StepAwareMixin):
@@ -189,7 +231,12 @@ class VotingLayer(nn.Module, base.StepModule):
         self.step_mode = step_mode
 
     def single_step_forward(self, x: Tensor) -> Tensor:
-        return F.avg_pool1d(x.unsqueeze(1), self.voting_size, self.voting_size).squeeze(1)
+        def vote(value: Tensor) -> Tensor:
+            return F.avg_pool1d(
+                value.unsqueeze(1), self.voting_size, self.voting_size
+            ).squeeze(1)
+
+        return _fp32_island_forward(vote, x)
 
     def forward(self, x: Tensor) -> Tensor:
         if self.step_mode == "s":
@@ -197,9 +244,34 @@ class VotingLayer(nn.Module, base.StepModule):
         return functional.seq_to_ann_forward(x, self.single_step_forward)
 
 
+_FP32_ISLAND_MODULES = (
+    nn.modules.batchnorm._BatchNorm,
+    nn.AvgPool1d,
+    nn.AvgPool2d,
+    nn.AvgPool3d,
+    nn.AdaptiveAvgPool1d,
+    nn.AdaptiveAvgPool2d,
+    nn.AdaptiveAvgPool3d,
+)
+
+
+def _module_forward_with_bf16_policy(module: nn.Module, x: Tensor) -> Tensor:
+    if isinstance(module, _FP32_ISLAND_MODULES):
+        return _fp32_island_forward(module, x)
+    return module(x)
+
+
 class SeqToANNContainer(nn.Sequential, base.MultiStepModule):
     def forward(self, x_seq: Tensor) -> Tensor:
-        return functional.seq_to_ann_forward(x_seq, tuple(self))
+        if not is_npu_bf16_autocast_active():
+            return functional.seq_to_ann_forward(x_seq, tuple(self))
+        if x_seq.ndim < 2:
+            raise ValueError(f"expected at least [T, N], got shape={tuple(x_seq.shape)}")
+        time_steps, batch_size = x_seq.shape[:2]
+        output = x_seq.flatten(0, 1)
+        for module in self:
+            output = _module_forward_with_bf16_policy(module, output)
+        return output.unflatten(0, (time_steps, batch_size))
 
 
 class SpikingSelfAttention(nn.Module, base.MultiStepModule):

@@ -2,6 +2,7 @@ import pytest
 import torch
 from torch import nn
 
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 from spikingjelly_npu.sequence import transformer
 
 
@@ -104,6 +105,67 @@ def test_multihead_attention_masks_weights_and_gradients(batch_first, training):
     torch.testing.assert_close(actual_key.grad, expected_key.grad)
     torch.testing.assert_close(actual_value.grad, expected_value.grad)
     _assert_parameter_grads_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("factory", "input_shapes"),
+    [
+        (
+            lambda: transformer.MultiheadAttention(8, 2, dropout=0.0, batch_first=True),
+            ((2, 4, 8), (2, 4, 8), (2, 4, 8)),
+        ),
+        (
+            lambda: transformer.TransformerEncoderLayer(
+                8, 2, dim_feedforward=16, dropout=0.0, batch_first=True
+            ),
+            ((2, 4, 8),),
+        ),
+        (
+            lambda: transformer.TransformerDecoderLayer(
+                8, 2, dim_feedforward=16, dropout=0.0, batch_first=True
+            ),
+            ((2, 3, 8), (2, 4, 8)),
+        ),
+    ],
+)
+def test_standard_transformer_bf16_profile_delegates_upstream_with_fp32_master_state(
+    monkeypatch, factory, input_shapes
+):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    module = factory().train()
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.01)
+    inputs = tuple(torch.randn(*shape, requires_grad=True) for shape in input_shapes)
+
+    with npu_bf16_autocast():
+        output = module(*inputs)
+        if isinstance(output, tuple):
+            output = output[0]
+        loss = output.float().square().mean()
+    loss.backward()
+    optimizer.step()
+
+    assert output.dtype in {torch.bfloat16, torch.float32}
+    assert all(value.grad is not None and value.grad.dtype == torch.float32 for value in inputs)
+    assert all(parameter.dtype == torch.float32 for parameter in module.parameters())
+    assert all(parameter.grad is not None for parameter in module.parameters())
+    assert all(parameter.grad.dtype == torch.float32 for parameter in module.parameters())
 
 
 def test_multihead_attention_causal_hint_matches_torch():

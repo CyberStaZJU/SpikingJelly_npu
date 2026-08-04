@@ -8,6 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence
 
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 from spikingjelly_npu.sequence import recurrent
 
 
@@ -475,6 +476,30 @@ FORCED_FALLBACK_CASES = [
         id="lstm-projected-bidirectional",
     ),
 ]
+
+
+def test_fp32_npu_fallback_remains_active_inside_explicit_bf16_profile(monkeypatch):
+    fake_input = type(
+        "FakeInput",
+        (),
+        {"device": type("FakeDevice", (), {"type": "npu"})(), "dtype": torch.float32},
+    )()
+    monkeypatch.setattr(recurrent, "Tensor", type(fake_input))
+
+    assert recurrent._should_use_fp32_npu_fallback(fake_input)
+    with npu_bf16_autocast(enabled=False):
+        assert recurrent._should_use_fp32_npu_fallback(fake_input)
+
+    class FakeAutocast:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(torch, "autocast", lambda **_kwargs: FakeAutocast())
+    with npu_bf16_autocast():
+        assert recurrent._should_use_fp32_npu_fallback(fake_input)
 
 
 def _force_fp32_fallback(monkeypatch):

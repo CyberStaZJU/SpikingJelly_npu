@@ -12,6 +12,7 @@ from spikingjelly_npu.activation_based.model import (
     spikformer_s,
     spikformer_ti,
 )
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 
 
 def _tiny_model(**kwargs):
@@ -145,6 +146,48 @@ def test_spikformer_manual_flow_matches_public_features_and_forward():
 
     torch.testing.assert_close(actual_features, expected_features)
     torch.testing.assert_close(actual_logits, expected_logits)
+
+
+def test_spikformer_bf16_profile_keeps_logits_reductions_and_state_fp32(
+    monkeypatch,
+):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    model = _tiny_model().train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    x = torch.randn(2, 2, 3, 32, 32, requires_grad=True)
+
+    with npu_bf16_autocast():
+        features = model.forward_features(x)
+        functional.reset_net(model)
+        logits = model(x)
+        loss = logits.square().mean()
+    loss.backward()
+    optimizer.step()
+
+    nodes = [module for module in model.modules() if isinstance(module, neuron.BaseNode)]
+    assert features.dtype == torch.float32
+    assert logits.dtype == torch.float32
+    assert nodes and all(node.v.dtype == torch.float32 for node in nodes)
+    assert all(parameter.dtype == torch.float32 for parameter in model.parameters())
+    assert all(parameter.grad is not None for parameter in model.parameters())
+    assert all(parameter.grad.dtype == torch.float32 for parameter in model.parameters())
 
 
 def test_spikformer_finite_gradients_cover_stem_attention_mlp_and_head():

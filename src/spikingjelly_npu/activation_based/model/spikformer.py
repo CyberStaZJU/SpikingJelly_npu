@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 
+import torch
 from torch import Tensor, nn
 
+from ...npu.amp import is_npu_bf16_autocast_active
 from .. import base, layer, neuron
 from ..layer import SpikingSelfAttention
 
@@ -461,10 +463,18 @@ class Spikformer(nn.Module, base.MultiStepModule):
         x_seq = self.patch_embed(x_seq)
         for block in self.blocks:
             x_seq = block(x_seq)
-        return x_seq.flatten(3).mean(dim=-1)
+        features = x_seq.flatten(3)
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                return features.float().mean(dim=-1)
+        return features.mean(dim=-1)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.head(self.forward_features(x))
+        logits = self.head(self.forward_features(x))
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                return logits.float()
+        return logits
 
 
 def spikformer_ti(

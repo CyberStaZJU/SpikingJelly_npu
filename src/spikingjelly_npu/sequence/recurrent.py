@@ -1,9 +1,11 @@
-"""Standard recurrent layers with an FP32 NPU compatibility fallback.
+"""Standard recurrent layers with an FP32-state NPU compatibility fallback.
 
 The public classes remain direct :mod:`torch.nn` subclasses. CPU execution and
-all non-FP32 NPU dtypes delegate to the upstream fused implementation. FP32 NPU
+non-FP32 NPU storage delegate to the upstream fused implementation. FP32 NPU
 inputs use a narrow eager decomposition because the CANN 8.5 fused recurrent
-route is not available for that dtype.
+route is not available for that storage dtype. Under the explicit BF16 profile,
+its affine operators may autocast to BF16 while gates and recurrent state are
+promoted back to FP32.
 """
 
 from typing import overload
@@ -12,6 +14,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import PackedSequence
+
+from ..npu.amp import is_npu_bf16_autocast_active
 
 
 def _should_use_fp32_npu_fallback(input: object) -> bool:
@@ -143,6 +147,12 @@ def _recurrent_step(
     weight_hr: Tensor | None,
 ) -> tuple[Tensor, Tensor | None]:
     hidden_affine = F.linear(hidden, weight_hh, bias_hh)
+    if is_npu_bf16_autocast_active():
+        input_affine = input_affine.float()
+        hidden_affine = hidden_affine.float()
+        hidden = hidden.float()
+        if cell is not None:
+            cell = cell.float()
     if kind == "rnn_tanh":
         return torch.tanh(input_affine + hidden_affine), None
     if kind == "rnn_relu":

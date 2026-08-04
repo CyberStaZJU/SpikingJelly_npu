@@ -13,6 +13,7 @@ import torch
 from torch import Tensor, nn
 
 from .activation_based import _aspy, layer, surrogate
+from .npu.amp import is_npu_bf16_autocast_active
 
 
 class PoissonEncoder(nn.Module):
@@ -48,10 +49,13 @@ class MultiStepIF(nn.Module):
         self.detach_reset = bool(detach_reset)
 
     def forward(self, current_seq: Tensor) -> Tensor:
-        membrane = torch.zeros_like(current_seq[0])
+        state_dtype = torch.float32 if is_npu_bf16_autocast_active() else current_seq.dtype
+        membrane = torch.zeros(
+            current_seq.shape[1:], dtype=state_dtype, device=current_seq.device
+        )
         spikes = []
         for t in range(current_seq.shape[0]):
-            membrane = membrane + current_seq[t]
+            membrane = membrane + current_seq[t].to(dtype=state_dtype)
             spike = self.surrogate_function(membrane - self.v_threshold)
             reset_spike = spike.detach() if self.detach_reset else spike
             if self.v_reset is None:
@@ -59,7 +63,10 @@ class MultiStepIF(nn.Module):
             else:
                 membrane = reset_spike * self.v_reset + (1.0 - reset_spike) * membrane
             spikes.append(spike)
-        return torch.stack(spikes)
+        output = torch.stack(spikes)
+        if is_npu_bf16_autocast_active() and current_seq.dtype == torch.bfloat16:
+            return output.to(dtype=current_seq.dtype)
+        return output
 
 
 class FedSNNDecayLIF(nn.Module):
@@ -112,7 +119,8 @@ class FedSNNDecayLIF(nn.Module):
     def _torch_forward(self, current_seq: Tensor) -> Tensor:
         state_dtype = (
             torch.float32
-            if self.backend == "aspy" and current_seq.dtype == torch.bfloat16
+            if (self.backend == "aspy" and current_seq.dtype == torch.bfloat16)
+            or is_npu_bf16_autocast_active()
             else current_seq.dtype
         )
         membrane = torch.zeros(
@@ -123,7 +131,7 @@ class FedSNNDecayLIF(nn.Module):
         spikes = []
         for t in range(current_seq.shape[0]):
             charged = membrane * self.membrane_decay
-            charged = charged + current_seq[t]
+            charged = charged + current_seq[t].to(dtype=state_dtype)
             spike = self.surrogate_function(charged - self.v_threshold)
             membrane = charged - spike.detach() * self.v_threshold
             spikes.append(spike)
@@ -199,14 +207,18 @@ class MultiStepLIF(nn.Module):
         self.detach_reset = bool(detach_reset)
 
     def forward(self, current_seq: Tensor) -> Tensor:
-        membrane = torch.zeros_like(current_seq[0])
+        state_dtype = torch.float32 if is_npu_bf16_autocast_active() else current_seq.dtype
+        membrane = torch.zeros(
+            current_seq.shape[1:], dtype=state_dtype, device=current_seq.device
+        )
         spikes = []
         reset = 0.0 if self.v_reset is None else self.v_reset
         for t in range(current_seq.shape[0]):
+            current = current_seq[t].to(dtype=state_dtype)
             if self.decay_input:
-                membrane = membrane + (current_seq[t] - (membrane - reset)) / self.tau
+                membrane = membrane + (current - (membrane - reset)) / self.tau
             else:
-                membrane = membrane - (membrane - reset) / self.tau + current_seq[t]
+                membrane = membrane - (membrane - reset) / self.tau + current
             spike = self.surrogate_function(membrane - self.v_threshold)
             reset_spike = spike.detach() if self.detach_reset else spike
             if self.v_reset is None:
@@ -214,7 +226,10 @@ class MultiStepLIF(nn.Module):
             else:
                 membrane = reset_spike * self.v_reset + (1.0 - reset_spike) * membrane
             spikes.append(spike)
-        return torch.stack(spikes)
+        output = torch.stack(spikes)
+        if is_npu_bf16_autocast_active() and current_seq.dtype == torch.bfloat16:
+            return output.to(dtype=current_seq.dtype)
+        return output
 
 
 class BNTT1d(nn.Module):
@@ -246,6 +261,12 @@ class BNTT1d(nn.Module):
             raise ValueError(
                 f"expected T={self.time_steps}, got input shape={tuple(input_seq.shape)}"
             )
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                output = torch.stack(
+                    [self.layers[t](input_seq[t].float()) for t in range(self.time_steps)]
+                )
+            return output.to(dtype=input_seq.dtype)
         return torch.stack([self.layers[t](input_seq[t]) for t in range(self.time_steps)])
 
 
@@ -278,6 +299,12 @@ class BNTT2d(nn.Module):
             raise ValueError(
                 f"expected T={self.time_steps}, got input shape={tuple(input_seq.shape)}"
             )
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                output = torch.stack(
+                    [self.layers[t](input_seq[t].float()) for t in range(self.time_steps)]
+                )
+            return output.to(dtype=input_seq.dtype)
         return torch.stack([self.layers[t](input_seq[t]) for t in range(self.time_steps)])
 
 
@@ -357,7 +384,11 @@ class PackedBNTTConvNet(nn.Module):
         spikes = self.neuron1(self.bntt1(self.conv1(input_seq)))
         spikes = self.neuron2(self.bntt2(self.conv2(self.pool1(spikes))))
         spikes = self.neuron3(self.bntt3(self.fc1(self.flatten(self.pool2(spikes)))))
-        return self.readout(spikes).mean(0)
+        logits = self.readout(spikes)
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                return logits.float().mean(0)
+        return logits.mean(0)
 
     def forward_current_seq_stepwise(self, input_seq: Tensor) -> Tensor:
         if input_seq.shape[0] != self.time_steps:
@@ -366,7 +397,8 @@ class PackedBNTTConvNet(nn.Module):
             )
         currents = torch.stack(
             [
-                self.bntt1.layers[t](
+                layer._fp32_island_forward(
+                    self.bntt1.layers[t],
                     torch.nn.functional.conv2d(
                         input_seq[t],
                         self.conv1.weight,
@@ -375,7 +407,7 @@ class PackedBNTTConvNet(nn.Module):
                         self.conv1.padding,
                         self.conv1.dilation,
                         self.conv1.groups,
-                    )
+                    ),
                 )
                 for t in range(self.time_steps)
             ]
@@ -383,16 +415,20 @@ class PackedBNTTConvNet(nn.Module):
         spikes = self.neuron1(currents)
         currents = torch.stack(
             [
-                self.bntt2.layers[t](
+                layer._fp32_island_forward(
+                    self.bntt2.layers[t],
                     torch.nn.functional.conv2d(
-                        torch.nn.functional.avg_pool2d(spikes[t], 2, 2),
+                        layer._fp32_island_forward(
+                            lambda value: torch.nn.functional.avg_pool2d(value, 2, 2),
+                            spikes[t],
+                        ),
                         self.conv2.weight,
                         self.conv2.bias,
                         self.conv2.stride,
                         self.conv2.padding,
                         self.conv2.dilation,
                         self.conv2.groups,
-                    )
+                    ),
                 )
                 for t in range(self.time_steps)
             ]
@@ -400,10 +436,15 @@ class PackedBNTTConvNet(nn.Module):
         spikes = self.neuron2(currents)
         currents = []
         for t in range(self.time_steps):
-            pooled = torch.nn.functional.adaptive_avg_pool2d(spikes[t], self.pool2.output_size)
+            pooled = layer._fp32_island_forward(
+                lambda value: torch.nn.functional.adaptive_avg_pool2d(
+                    value, self.pool2.output_size
+                ),
+                spikes[t],
+            )
             flattened = torch.flatten(pooled, 1)
             current = torch.nn.functional.linear(flattened, self.fc1.weight, self.fc1.bias)
-            currents.append(self.bntt3.layers[t](current))
+            currents.append(layer._fp32_island_forward(self.bntt3.layers[t], current))
         spikes = self.neuron3(torch.stack(currents))
         logits = torch.stack(
             [
@@ -411,6 +452,9 @@ class PackedBNTTConvNet(nn.Module):
                 for t in range(self.time_steps)
             ]
         )
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                return logits.float().mean(0)
         return logits.mean(0)
 
     def forward(self, inputs: Tensor) -> Tensor:
@@ -460,7 +504,12 @@ class PackedBNTTMLP(nn.Module):
             )
         hidden_current = self.fc1(current_seq)
         hidden_spikes = self.neuron1(self.bntt1(hidden_current))
-        logits = self.fc2(hidden_spikes).mean(0)
+        output_current = self.fc2(hidden_spikes)
+        if is_npu_bf16_autocast_active():
+            with torch.autocast(device_type="npu", enabled=False):
+                logits = output_current.float().mean(0)
+        else:
+            logits = output_current.mean(0)
         if return_spikes:
             return logits, hidden_spikes
         return logits

@@ -7,6 +7,8 @@ import math
 import torch
 from torch import nn
 
+from ..npu.amp import is_npu_bf16_autocast_active
+
 
 def heaviside(x: torch.Tensor) -> torch.Tensor:
     """Return one where ``x >= 0`` and zero elsewhere, preserving dtype/device."""
@@ -35,6 +37,20 @@ class SurrogateFunctionBase(nn.Module):
         raise NotImplementedError
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if is_npu_bf16_autocast_active():
+            public_dtype = x.dtype
+            with torch.autocast(device_type="npu", enabled=False):
+                state_input = x.float()
+                primitive = self.primitive_function(state_input, **self._sg_params)
+                output = (
+                    primitive
+                    if not self.spiking
+                    else heaviside(state_input).detach()
+                    - primitive.detach()
+                    + primitive
+                )
+            return output.to(dtype=public_dtype) if x.dtype == torch.bfloat16 else output
+
         primitive = self.primitive_function(x, **self._sg_params)
         if not self.spiking:
             return primitive

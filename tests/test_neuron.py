@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from spikingjelly_npu.activation_based import _aspy, functional, neuron, surrogate
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 from spikingjelly_npu.routing import ProviderRoute
 
 
@@ -32,6 +33,80 @@ def test_ifnode_soft_reset_and_reset_net_preserve_no_state_dict_memory():
     assert node.state_dict() == {}
     functional.reset_net(node)
     torch.testing.assert_close(node.v, torch.zeros_like(node.v))
+
+
+def test_torch_lif_keeps_fp32_state_and_public_output_in_bf16_profile(monkeypatch):
+    class FakeAutocast:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(torch, "autocast", lambda **_kwargs: FakeAutocast())
+    node = neuron.LIFNode(
+        tau=2.0,
+        decay_input=True,
+        v_threshold=10.0,
+        step_mode="m",
+        store_v_seq=True,
+    )
+    x = torch.tensor([[[2.0]], [[0.0]]], dtype=torch.bfloat16)
+
+    with npu_bf16_autocast():
+        output = node(x)
+
+    assert output.dtype == torch.bfloat16
+    assert node.v.dtype == torch.float32
+    assert node.v_seq.dtype == torch.float32
+    torch.testing.assert_close(node.v, torch.tensor([[0.5]]))
+
+
+def test_lifnode_bf16_profile_resets_with_fp32_internal_spike(monkeypatch):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    node = neuron.LIFNode(
+        tau=2.0,
+        decay_input=False,
+        v_threshold=1.0,
+        step_mode="s",
+        surrogate_function=surrogate.ATan(),
+    )
+    reset_dtypes = []
+    original_reset = node.neuronal_reset
+
+    def inspect_reset(spike):
+        reset_dtypes.append(spike.dtype)
+        return original_reset(spike)
+
+    monkeypatch.setattr(node, "neuronal_reset", inspect_reset)
+    x = torch.full((2, 3), 1.25, dtype=torch.bfloat16, requires_grad=True)
+
+    with npu_bf16_autocast():
+        output = node(x)
+        loss = output.float().sum() + node.v.sum()
+    loss.backward()
+
+    assert output.dtype == torch.bfloat16
+    assert reset_dtypes == [torch.float32]
+    assert node.v.dtype == torch.float32
+    assert x.grad is not None and x.grad.dtype == torch.bfloat16
 
 
 def test_lifnode_equations_and_persistent_state():

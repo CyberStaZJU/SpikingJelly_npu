@@ -4,6 +4,7 @@ from torch import nn
 
 from spikingjelly_npu.activation_based import functional, neuron
 from spikingjelly_npu.activation_based.layer import SpikingSelfAttention
+from spikingjelly_npu.npu.amp import npu_bf16_autocast
 
 
 def test_ssa_legacy_module_is_the_same_canonical_class():
@@ -85,6 +86,45 @@ def test_ssa_forward_matches_manual_module_flow():
     expected = reference_module.proj_lif(reference_module.proj_conv_bn(expected))
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_ssa_bf16_profile_keeps_public_spikes_and_state_boundaries(monkeypatch):
+    original_autocast = torch.autocast
+
+    class CPUAutocast:
+        def __init__(self, **kwargs):
+            if not kwargs.get("enabled", True):
+                self.context = original_autocast(device_type="cpu", enabled=False)
+            else:
+                self.context = original_autocast(
+                    device_type="cpu", dtype=torch.bfloat16, cache_enabled=False
+                )
+
+        def __enter__(self):
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self.context.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(torch, "autocast", lambda **kwargs: CPUAutocast(**kwargs))
+    module = SpikingSelfAttention(dim=4, num_heads=2).train()
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.01)
+    x = torch.randn(2, 2, 4, 3, requires_grad=True)
+
+    with npu_bf16_autocast():
+        output = module(x)
+        loss = output.float().square().mean()
+    loss.backward()
+    optimizer.step()
+
+    assert output.dtype == torch.bfloat16
+    assert all(
+        node.v.dtype == torch.float32
+        for node in (module.qkv_lif, module.attn_lif, module.proj_lif)
+    )
+    assert all(parameter.dtype == torch.float32 for parameter in module.parameters())
+    assert all(parameter.grad is not None for parameter in module.parameters())
+    assert all(parameter.grad.dtype == torch.float32 for parameter in module.parameters())
 
 
 def test_ssa_gradients_reset_and_backend_cpu_fallback():

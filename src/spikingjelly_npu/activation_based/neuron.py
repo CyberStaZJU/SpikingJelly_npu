@@ -8,6 +8,7 @@ from typing import Tuple
 import torch
 from torch import nn
 
+from ..npu.amp import is_npu_bf16_autocast_active
 from . import _aspy, base, surrogate
 
 
@@ -76,7 +77,10 @@ class BaseNode(base.MemoryModule):
 
     def v_float_to_tensor(self, x: torch.Tensor) -> None:
         state_dtype = (
-            torch.float32 if self.backend == "aspy" and x.dtype == torch.bfloat16 else x.dtype
+            torch.float32
+            if (self.backend == "aspy" and x.dtype == torch.bfloat16)
+            or is_npu_bf16_autocast_active()
+            else x.dtype
         )
         if isinstance(self.v, int | float):
             self.v = torch.full(
@@ -103,7 +107,11 @@ class BaseNode(base.MemoryModule):
         raise NotImplementedError
 
     def neuronal_fire(self) -> torch.Tensor:
-        return self.surrogate_function(self.v - self.v_threshold)
+        voltage = self.v - self.v_threshold
+        if not is_npu_bf16_autocast_active():
+            return self.surrogate_function(voltage)
+        with torch.autocast(device_type="npu", enabled=False):
+            return self.surrogate_function(voltage.float()).float()
 
     def neuronal_reset(self, spike: torch.Tensor) -> None:
         spike_for_reset = spike.detach() if self.detach_reset else spike
@@ -114,9 +122,12 @@ class BaseNode(base.MemoryModule):
 
     def single_step_forward(self, x: torch.Tensor) -> torch.Tensor:
         self.v_float_to_tensor(x)
-        self.neuronal_charge(x)
+        state_input = x.float() if is_npu_bf16_autocast_active() else x
+        self.neuronal_charge(state_input)
         spike = self.neuronal_fire()
         self.neuronal_reset(spike)
+        if is_npu_bf16_autocast_active() and x.dtype == torch.bfloat16:
+            return spike.to(dtype=x.dtype)
         return spike
 
     def _torch_multi_step_forward(self, x_seq: torch.Tensor) -> torch.Tensor:

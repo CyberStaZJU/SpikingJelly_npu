@@ -1,5 +1,6 @@
 {
   "claim_boundary": "These are small- or tiny-shape FP32 adaptation and component results on the stated stack. They do not establish representative-shape, convergence, graph, native Spikformer execution, performance, or family-wide acceleration. Standard recurrent, spiking recurrent, and Transformer results are eager compatibility/parity evidence. SpikingSelfAttention and Spikformer train/eval parity is qualified only when the process explicitly applies configure_npu(allow_conv_hf32=False); the default Conv HF32 policy remains unqualified for the tested Spikformer training gradients.",
+  "current_api_note": "The recorded configure_npu(allow_conv_hf32=False) call belongs to the measured historical source identity and is no longer exposed by the current package. Retain this record for provenance; do not execute its removed API against current source.",
   "date": "2026-08-03",
   "evidence": {
     "compact_if_lif": {
@@ -60,7 +61,7 @@
         "continuous_final_state_max_abs": 0.00035059452056884766,
         "input_gradient_max_abs": 0.0008228407823480666,
         "input_gradient_mismatches": 32,
-        "loss_max_abs": 0.000016450881958007812,
+        "loss_max_abs": 1.6450881958007812e-05,
         "output_max_abs": 1.4901161193847656e-08,
         "parameter_gradient_failed_count": 7,
         "parameter_gradient_total_count": 29,
@@ -98,7 +99,7 @@
         "worst_max_abs": {
           "continuous_node_final_state": 8.940696716308594e-07,
           "final_state_dict": 3.725290298461914e-09,
-          "initial_node_state_gradient": 1.3038516044616699e-08,
+          "initial_node_state_gradient": 1.30385160446167e-08,
           "input_gradient": 3.3527612686157227e-08,
           "optimizer_update": 3.725290298461914e-09,
           "parameter_gradient": 2.3692846298217773e-06,
@@ -111,7 +112,7 @@
       "source_tree": "e0d080276eb2023063df45d34c89b125fc9b1850",
       "status": "conditional_training_parity_pass_with_explicit_conv_hf32_off",
       "unchanged_tight_tolerance": {
-        "atol": 0.00002,
+        "atol": 2e-05,
         "rtol": 0.0002
       },
       "unqualified": [
@@ -191,5 +192,8 @@
     "torch": "2.9.0",
     "torch_npu": "2.9.0"
   },
-  "schema_version": 1
+  "record_status": "historical_superseded_api_evidence",
+  "schema_version": 1,
+  "superseded_by": "bf16_mixed_acceptance_policy_20260804.json",
+  "superseded_on": "2026-08-04"
 }
