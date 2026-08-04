@@ -47,9 +47,20 @@ The frozen training shape is Spikformer `T=4`, batch `64`, input `224x224`, embe
 | Peak allocated HBM | 25.70 GiB | 30.48 GiB | `15.7%` lower |
 | Peak reserved HBM | 30.68 GiB | 37.78 GiB | `18.8%` lower |
 
-At batch `8`, BF16 was `26.3%` slower than FP32 despite using less HBM. The latency claim is therefore restricted to the frozen batch-64 shape; it is not a universal BF16 speed claim.
+At batch `8`, BF16 was `26.3%` slower than FP32 despite using `14.9%` less peak allocated HBM and `16.1%` less peak reserved HBM. The latency claim is therefore restricted to the frozen batch-64 shape; it is not a universal BF16 speed claim.
+
+The current evidence does not isolate one causal operator, so the batch-8 regression must be treated as a profiling hypothesis rather than an established root cause. The leading explanation is that the small batch is launch/dispatch/conversion-bound: BF16 Conv/MatMul work is too small to amortize kernel scheduling, while the number of BatchNorm, LIF/surrogate, reduction, optimizer, and BF16↔FP32 island boundaries remains high. Ascend physical-format conversion and the package policy's `cache_enabled=False` autocast dispatch may add further fixed cost. This interpretation is consistent with batch-8 evaluation NPUGraph removing enough launch overhead to reach `2.421x`, while the larger batch-64 eager training shape benefits directly from BF16 compute and HBM reduction. It is not yet proof that any one of casts, format conversion, LIF recurrence, or autocast dispatch dominates.
 
 A fixed-synthetic-batch, ten-class canary with the same architecture at batch `8` completed 200 updates, reduced first-20 mean loss `2.1058` to last-20 mean `8.433e-4`, and reached 100% training accuracy. This only checks optimization health and cannot support dataset convergence or generalization claims.
+
+### Follow-up work for the batch-8 regression
+
+1. Run matched batch-8 and batch-64 Ascend stage profiles for BF16 and FP32, reporting Conv/MatMul, BatchNorm, LIF/surrogate forward and backward, casts, `TransData`/format conversion, reductions, optimizer step, kernel count, average kernel duration, device idle gaps, AI Core utilization, and HBM bandwidth.
+2. Add controlled ablations that preserve public semantics: count and time BF16↔FP32 island boundaries; compare model-only forward, forward+backward, and full optimizer steps; and test autocast weight-cache policy only after state and numerical behavior are requalified.
+3. Use the profile to determine whether the exact Spikformer Sigmoid-surrogate multi-step LIF recurrence is launch-bound. Implement a BF16-public/FP32-state native scan only if isolated-hotspot, containing-block, and complete-model gates all pass with exact spike semantics and first-order gradients.
+4. Revisit fixed-shape graph execution only for evaluation until the saved-tensor second-backward training-capture failure is understood. Do not bypass the runner's poison/no-eager-replay rule.
+5. Re-run balanced five-fresh-process measurements across a small batch sweep such as `8/16/32/64` to locate the BF16 crossover point. Keep latency claims bucket-specific and retain negative results.
+6. Add real-dataset multi-seed training only after the execution profile is stable; keep optimization-health, convergence, generalization, and performance as separate evidence levels.
 
 Fixed-shape BF16 evaluation NPUGraph replay was exact against eager for changed inputs at batches `8` and `64`, and strict mismatched batches were rejected before execution. Five fresh batch-8 processes measured `2.421x` median replay speedup. At the frozen batch-64 shape, however, graph replay was about `5%` slower than eager, so that bucket is qualified for correctness only. Training capture failed after launch with a saved-tensor second-backward error; the runner poisoned itself and did not execute eager fallback. Spikformer training NPUGraph is not qualified.
 

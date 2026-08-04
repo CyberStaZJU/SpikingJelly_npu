@@ -1,6 +1,24 @@
 {
   "bf16_vs_fp32_training_performance": {
     "all_runs_finite": true,
+    "batch8_regression_analysis": {
+      "leading_hypothesis": "The small batch is launch/dispatch/conversion-bound: BF16 Conv/MatMul work is too small to amortize fixed scheduling while BatchNorm, LIF/surrogate, reductions, optimizer work, and BF16-to-FP32 island boundaries remain numerous.",
+      "not_yet_proven": [
+        "cast kernels dominate",
+        "TransData or physical-format conversion dominates",
+        "LIF recurrence dominates",
+        "autocast cache policy dominates"
+      ],
+      "observed_latency": "BF16 was 26.3% slower than FP32 at batch 8.",
+      "observed_memory": "BF16 reduced peak allocated HBM by 14.9% and peak reserved HBM by 16.1%.",
+      "secondary_hypotheses": [
+        "Ascend physical-format conversion or temporary materialization contributes a larger fraction at batch 8.",
+        "The package-managed autocast policy uses cache_enabled=false and may add fixed dispatch or weight-conversion cost.",
+        "FP32 master parameters, gradients, optimizer state, and sensitive-state islands limit the fraction accelerated by BF16."
+      ],
+      "status": "hypothesis_pending_stage_profile",
+      "supporting_observation": "Batch-8 fixed-shape evaluation NPUGraph reached 2.421x versus eager, consistent with launch overhead being important, but evaluation graph evidence does not prove the training root cause."
+    },
     "median_of_process_medians_seconds": {
       "bf16": 0.4622022211551666,
       "bf16_latency_reduction_percent": 7.47224095575878,
@@ -26,6 +44,15 @@
     "shape_dependence": "At batch 8 the same BF16 policy was 26.3% slower than FP32 while reducing allocated HBM by 14.9%; performance claims are therefore restricted to the frozen batch-64 shape."
   },
   "claim_boundary": "Qualified on the stated stack: BF16 mixed eager training feasibility and three-seed 20-step stability at T=4, B=64, 224x224, D=384, six heads, four blocks; a bounded 200-update fixed-batch optimization canary; and exact fixed-shape evaluation NPUGraph replay at B=8 and B=64. Only the frozen B=64 eager training benchmark showed a BF16 latency and HBM benefit. This does not establish dataset convergence, generalization, arbitrary Spikformer variants, training NPUGraph, a custom native Spikformer operator, FP8, or universal architecture-family acceleration.",
+  "follow_up_work": [
+    "Run matched BF16/FP32 Ascend stage profiles at batches 8 and 64 and report Conv/MatMul, BatchNorm, LIF/surrogate forward/backward, Cast, TransData/format conversion, reductions, optimizer step, kernel count, average kernel duration, idle gaps, AI Core utilization, and HBM bandwidth.",
+    "Separate model-only forward, forward plus backward, and full optimizer-step timing; count and time BF16-to-FP32 island boundaries without changing public semantics.",
+    "Profile batches 8, 16, 32, and 64 with the existing balanced five-fresh-process protocol to locate the BF16 crossover point and keep claims bucket-specific.",
+    "Evaluate autocast weight caching only after numerical, state, import-side-effect, and concurrency behavior are independently qualified.",
+    "Consider an exact Sigmoid-surrogate BF16-public/FP32-state multi-step LIF scan only if profiling proves launch-bound recurrence and isolated-hotspot, block, and complete-model gates pass.",
+    "Keep Spikformer training NPUGraph unsupported until the saved-tensor second-backward capture failure is understood without weakening poison/no-eager-replay semantics.",
+    "Run real-dataset multi-seed convergence/generalization only after execution profiling and route identity are stable; report it separately from optimization-health and performance evidence."
+  ],
   "frozen_representative_shape": {
     "T": 4,
     "classes": 1000,
@@ -137,7 +164,7 @@
     "branch": "grok/sequence-semantic-alpha-20260803",
     "matrix_junit_sha256": "645f86235d2e582efc1160d999c3d002cfdc13bd4cbed29b82a97c9d492ecca7",
     "matrix_result_sha256": "71f2702a336f90c618f8f740a9d8fda56a8a3e612c4b8a532a81853513534ef5",
-    "note": "Unreleased isolated-worktree evidence. This file does not authorize merge, push, release, or FedSNN dependency adoption.",
+    "note": "Published branch evidence after review. Publication does not authorize merge to main, a release, or FedSNN dependency adoption.",
     "post_measurement_difference": "The final reviewed tree differs from the measured snapshot only in Ruff import ordering for spikformer.py, amp.py, transformer.py, and test_runtime.py, plus making test_bf16_models_npu.py select ASCEND_DEVICE_ID/DEVICE_ID instead of hard-coding npu:7. Runtime semantics used by the measurements are unchanged.",
     "raw_result_sha256": {
       "frozen_rep_b64_3seed_20step": "cef581208af750931d00e8c0a23f5caa8d46e4239e06611e0806760a859569cf",
